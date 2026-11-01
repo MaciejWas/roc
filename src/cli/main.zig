@@ -11186,7 +11186,7 @@ fn fastDevLinkFormat(target: RocTarget) ?fast_dev_link.Format {
         .arm64musl, .arm64glibc, .arm64linux, .arm64v1musl, .arm64v1glibc, .arm64v1linux => .elf,
         .arm64mac, .x64mac, .x64v1mac => .macho,
         .x64win, .x64mingw, .arm64win, .arm64mingw, .x64v1win, .x64v1mingw, .arm64v1win, .arm64v1mingw => .coff,
-        .arm32linux, .arm32musl, .wasm32, .wasm32v1 => null,
+        .arm32linux, .arm32musl, .wasm32, .wasm32v1, .riscv64elf => null,
     };
 }
 

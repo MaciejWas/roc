@@ -23685,7 +23685,7 @@ pub const host_lir_codegen_target = RocTarget.detectNative();
 /// is being compiled to run on.
 ///
 /// Asks `isa.host`, not `host_lir_codegen_target`: `detectNative` maps an
-/// unknown architecture (riscv64, powerpc64le, ...) to an x64 target and
+/// unknown architecture (powerpc64le, ...) to an x64 target and
 /// big-endian aarch64 to a little-endian one, neither of which this host can
 /// execute. 32-bit ARM builds intentionally report false for now. The long-term
 /// fix is for dev builds on those targets to route through LLVM rather than
