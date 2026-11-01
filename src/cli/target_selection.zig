@@ -25,6 +25,7 @@ fn outputOs(target: RocTarget) OutputOs {
         .x64glibc,
         .x64linux,
         .x64elf,
+        .riscv64elf,
         .x64v1freebsd,
         .x64v1openbsd,
         .x64v1netbsd,

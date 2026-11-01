@@ -21,7 +21,7 @@ pub fn generateComprehensiveStub(
     switch (arch_class) {
         .x86_64 => try writer.writeAll("    xor %rax, %rax\n    ret\n\n"),
         .aarch64 => try writer.writeAll("    mov x0, #0\n    ret\n\n"),
-        .aarch64_be, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
+        .aarch64_be, .riscv64, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
     }
 
     // Essential libc symbols that must be present for linking
