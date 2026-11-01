@@ -671,6 +671,7 @@ const EmbeddedTargetObjects = struct {
     fn forTarget(requested: RocTarget) EmbeddedTargetObjects {
         if (requested == .wasm32v1) return comptime cross(.wasm32v1, .none);
         return switch (requested.defaultCpuTarget()) {
+            .riscv64elf => @panic("TODO: embed RISC-V runtime objects"),
             inline .x64musl,
             .arm64musl,
             .x64glibc,
@@ -5590,6 +5591,7 @@ fn defaultRunShimTarget(native: RocTarget) RocTarget {
         .x64openbsd,
         .x64netbsd,
         .x64elf,
+        .riscv64elf,
         .x64v1mac,
         .x64v1win,
         .x64v1mingw,

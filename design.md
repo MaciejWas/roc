@@ -24879,6 +24879,13 @@ producer metadata; only non-debug size builds remove target-feature metadata.
 
 ## Host Symbol ABI
 
+The initial embedded RISC-V target is `riscv64elf`: little-endian RV64I,
+freestanding ELF, with the LP64 integer calling convention and no libc or
+host feature detection. Its CPU contract explicitly excludes optional ISA
+extensions. Target registration does not imply code-generation support:
+LP64 layout classification, call lowering, and runtime integration remain
+unfinished and must not borrow another target's implementation or artifacts.
+
 The program's hosted catalog retains every visible hosted declaration and
 classifies its platform binding as mapped or unavailable. Only mapped entries
 carry a dispatch slot. An unavailable declaration lowers to the existing
