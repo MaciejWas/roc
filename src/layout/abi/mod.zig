@@ -18,7 +18,7 @@ pub const aarch64 = @import("aarch64.zig");
 pub const x86_64 = @import("x86_64.zig");
 pub const wasm = @import("wasm.zig");
 
-/// LP64 contract sketch; not yet a supported call.Target or classifier.
+/// LP64 layout classifier; call lowering is not yet connected.
 pub const riscv64 = @import("riscv64.zig");
 
 pub const call = @import("call.zig");
@@ -68,6 +68,7 @@ test {
     std.testing.refAllDecls(aarch64);
     std.testing.refAllDecls(x86_64);
     std.testing.refAllDecls(wasm);
+    std.testing.refAllDecls(riscv64);
     std.testing.refAllDecls(call);
 }
 
