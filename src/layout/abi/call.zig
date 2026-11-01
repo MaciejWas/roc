@@ -21,6 +21,7 @@ const store_mod = @import("../store.zig");
 const aarch64 = @import("aarch64.zig");
 const x86_64 = @import("x86_64.zig");
 const wasm = @import("wasm.zig");
+const riscv64 = @import("riscv64.zig");
 
 const Store = store_mod.Store;
 const Idx = layout.Idx;
@@ -29,10 +30,9 @@ const Idx = layout.Idx;
 pub const RegClass = enum { integer, float, vector };
 
 /// How a caller must widen a value into the argument register that carries it.
-/// C promotes integer types narrower than `int` at a call boundary, which clang
-/// expresses as the `zeroext`/`signext` parameter attributes and which an
-/// ABI-correct callee is entitled to rely on. Every other value leaves the
-/// register's remaining bits unspecified.
+/// The target ABI determines widening, expressed by LLVM zeroext/signext
+/// attributes. LP64 also sign-extends unsigned 32-bit scalars to XLEN.
+/// Every other value leaves the register's remaining bits unspecified.
 pub const RegExtension = enum { none, zero, sign };
 
 /// One register's worth of a value: which register file, the byte offset within the value's
@@ -46,6 +46,13 @@ pub const RegPiece = struct {
     /// lowering prevents consumers from reconstructing vector type information
     /// from byte size, which would lose the natural C signature.
     vector_kind: ?layout.Vector = null,
+    /// LLVM scalar carrier when a software-float ABI uses integer registers.
+    /// Memory pieces remain integers so transport preserves bits, not numeric
+    /// conversions. The producer records the float kind explicitly.
+    llvm_float: ?enum { f32, f64 } = null,
+    /// Explicit integer carrier width for normalized internal tail prototypes.
+    /// The memory piece retains its exact size; packing widens/truncates it.
+    llvm_integer_bits: ?u16 = null,
     /// Widening this piece's bytes must receive on their way into the register.
     /// Only a narrow integer scalar carries one; a piece of an aggregate does
     /// not, exactly as in the C signature the platform host is compiled from.
@@ -146,7 +153,7 @@ pub const PhysicalCall = struct {
 /// even-register rule. X86-64 splits System V vs Windows; wasm's pointer width
 /// is reflected in the store's `targetUsize`.
 pub const Target = enum {
-    // TODO: Add riscv64_lp64 once placementRiscv64 and call-wide lowering work.
+    riscv64_lp64,
     /// AAPCS64 on ELF targets.
     aarch64,
     aarch64_macho,
@@ -211,7 +218,7 @@ pub fn aarch64Target(os: std.Target.Os.Tag) Target {
 fn isAarch64(target: Target) bool {
     return switch (target) {
         .aarch64, .aarch64_macho, .aarch64_windows => true,
-        .x86_64_sysv, .x86_64_windows, .wasm32, .wasm32v1, .wasm64 => false,
+        .x86_64_sysv, .x86_64_windows, .wasm32, .wasm32v1, .wasm64, .riscv64_lp64 => false,
     };
 }
 
@@ -226,6 +233,7 @@ pub fn lower(
     ret_idx: Idx,
     needs_ops: bool,
 ) std.mem.Allocator.Error!LoweredCall {
+    if (target == .riscv64_lp64) return lowerRiscv64(arena, store, arg_idxs, ret_idx, needs_ops);
     const args = try arena.alloc(Placement, arg_idxs.len);
     for (arg_idxs, args) |arg_idx, *placement| {
         placement.* = try placementFor(arena, store, target, arg_idx, .arg);
@@ -298,6 +306,7 @@ pub fn markRegisterOverflow(target: Target, lowered: LoweredCall, trailing_point
     std.debug.assert(overflow.len == lowered.args.len);
     @memset(overflow, false);
     switch (target) {
+        .riscv64_lp64 => @panic("TODO: use the RISC-V fastcc tail-group plan for overflow"),
         .x86_64_windows => {
             // Every argument, and an indirect result's pointer, takes one
             // shared position.
@@ -466,6 +475,7 @@ pub fn assignPhysicalArgs(
     var stack_size: u32 = 0;
 
     if (lowered.ret == .indirect) switch (target) {
+        .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
         .x86_64_sysv, .x86_64_windows => {
             gp_used = 1;
             win_position = 1;
@@ -474,6 +484,7 @@ pub fn assignPhysicalArgs(
         .wasm32, .wasm32v1, .wasm64 => unreachable, // the entry assertion rejects wasm targets
     };
     if (lowered.leading_ops) switch (target) {
+        .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
         .x86_64_windows => {
             gp_used += 1;
             win_position += 1;
@@ -491,6 +502,7 @@ pub fn assignPhysicalArgs(
         switch (placement) {
             .none => assigned.* = .none,
             .indirect => switch (target) {
+                .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
                 .x86_64_sysv => assigned.* = .{ .stack_value = assignStackValue(
                     &stack_size,
                     size_align.size,
@@ -517,6 +529,7 @@ pub fn assignPhysicalArgs(
                 .wasm32, .wasm32v1, .wasm64 => unreachable, // the entry assertion rejects wasm targets
             },
             .registers => |registers| switch (target) {
+                .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
                 .x86_64_windows => {
                     const pieces = registers.pieces;
                     std.debug.assert(pieces.len == 1);
@@ -635,6 +648,7 @@ fn placementFor(
 
     const extend = narrowScalarExtension(store, idx);
     return switch (target) {
+        .riscv64_lp64 => placementRiscv64(arena, store, idx, ctx),
         .aarch64, .aarch64_macho, .aarch64_windows => placementAarch64(arena, store, target, idx, ctx, extend),
         .x86_64_sysv => placementSysV(arena, store, idx, ctx, extend),
         .x86_64_windows => placementWin64(arena, store, idx, ctx, extend),
@@ -712,25 +726,116 @@ fn integerPieces(
     return .{ .registers = .{ .pieces = pieces, .carrier = carrier } };
 }
 
+/// LP64 LLVM call plan. Target selection stays disconnected until the backend
+/// integration (including attributes and tail-call overflow) is complete.
+pub fn lowerRiscv64(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    arg_idxs: []const Idx,
+    ret_idx: Idx,
+    needs_ops: bool,
+) std.mem.Allocator.Error!LoweredCall {
+    const ret = try placementRiscv64(arena, store, ret_idx, .ret);
+    const args = try arena.alloc(Placement, arg_idxs.len);
+    for (arg_idxs, args) |idx, *arg| {
+        arg.* = try placementRiscv64(arena, store, idx, .arg);
+    }
+    // Unlike SysV, LP64 does not change the LLVM signature when a named
+    // argument runs out of registers. LLVM assigns the register/stack split,
+    // including the leading sret pointer consuming a0, from this signature.
+    return .{ .leading_ops = needs_ops, .ret = ret, .args = args };
+}
+
 fn placementRiscv64(
     arena: std.mem.Allocator,
     store: *const Store,
     idx: Idx,
     ctx: Context,
 ) std.mem.Allocator.Error!Placement {
-    _ = arena;
-    _ = store;
-    _ = idx;
-    _ = ctx;
-    // TODO: Consume riscv64.classifyType and classifyIntegerExtension.
-    // TODO: Emit explicit integer register pieces and LLVM carriers, including
-    // software-float bit transport; extend RegExtension for the LP64 rules.
-    // TODO: Lower indirect results through a leading pointer consuming a0.
-    // TODO: Integrate with lower/markRegisterOverflow without SysV's
-    // whole-aggregate spill rule; LP64 permits register/stack splits.
-    // TODO: Extend PhysicalArg and assignPhysicalArgs when implementing a
-    // native consumer: PhysicalArg currently cannot describe those splits.
-    @panic("TODO: implement RISC-V LP64 call placements");
+    if (store.layoutSize(store.getLayout(idx)) == 0) return .none;
+    return switch (riscv64.classifyType(store, idx)) {
+        .scalar => placementRiscv64Scalar(arena, store, idx, ctx),
+        .integer => placementRiscv64Chunks(arena, store, idx, ctx, 1),
+        .double_integer => placementRiscv64Chunks(arena, store, idx, ctx, 2),
+        .memory => placementRiscv64Indirect(store, idx, ctx),
+    };
+}
+
+fn placementRiscv64Scalar(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    start: Idx,
+    ctx: Context,
+) std.mem.Allocator.Error!Placement {
+    _ = ctx; // LP64 arguments and results use the same scalar carriers.
+    const idx = unwrapTransparentUnion(store, start);
+    const lay = store.getLayout(idx);
+    const size = store.layoutSize(lay);
+    const signedness: ?std.builtin.Signedness = switch (lay.tag) {
+        .scalar => if (lay.getScalar().tag == .int)
+            (if (idx.isSigned()) .signed else .unsigned)
+        else
+            null,
+        // classifyType established that a scalar union is a payload-free enum.
+        .tag_union => .unsigned,
+        .box, .box_of_zst, .ptr, .dynamic, .erased_callable => null,
+        .list, .list_of_zst, .struct_, .closure, .zst, .hole => unreachable, // riscv64.classifyType returns scalar only for integers, enums, and pointers
+    };
+    const extend: RegExtension = if (signedness) |sign| switch (riscv64.classifyIntegerExtension(@intCast(size * 8), sign)) {
+        .none => .none,
+        .sign_to_xlen => .sign,
+        // Zero-extending U8/U16 to XLEN gives the same bits as zero to 32
+        // followed by sign to XLEN. U32 instead needs LLVM signext i32.
+        .zero_to_32_then_sign_to_xlen => if (size == 4) .sign else .zero,
+    } else .none;
+    return onePiece(arena, .integer, 0, @intCast(size), extend);
+}
+
+fn placementRiscv64Chunks(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    start: Idx,
+    ctx: Context,
+    chunk_count: u8,
+) std.mem.Allocator.Error!Placement {
+    _ = ctx; // LP64 uses the same carrier for arguments and results.
+    const idx = unwrapTransparentUnion(store, start);
+    const lay = store.getLayout(idx);
+    const size_align = store.layoutSizeAlign(lay);
+    if (chunk_count != (size_align.size + 7) / 8) base.invariant("LP64 classifier's integer chunk count must match committed size", .{});
+    if (lay.tag == .scalar and lay.getScalar().tag == .frac) {
+        switch (lay.getScalar().getFrac()) {
+            .f32, .f64 => |precision| {
+                const pieces = try arena.alloc(RegPiece, 1);
+                pieces[0] = .{
+                    .class = .integer,
+                    .offset = 0,
+                    .size = @intCast(size_align.size),
+                    .llvm_float = if (precision == .f32) .f32 else .f64,
+                };
+                return .{ .registers = .{ .pieces = pieces } };
+            },
+            .dec => {}, // Glue exposes Dec as a 16-byte-aligned integer struct.
+        }
+    }
+    // Clang's LP64 carrier is the exact-sized integer for <= XLEN, i128
+    // for a 16-byte-aligned pair, otherwise [2 x i64]. ARM's existing array
+    // packing reads only each piece's bytes and widens a partial last piece.
+    const carrier: RegisterCarrier = if (size_align.size <= 8)
+        .piecewise
+    else if (size_align.alignment.toByteUnits() == 16)
+        .integer
+    else
+        .{ .array = null };
+    return integerPieces(arena, size_align.size, carrier, .none);
+}
+
+fn placementRiscv64Indirect(store: *const Store, idx: Idx, ctx: Context) Placement {
+    _ = ctx; // Argument-copy pointers and sret are distinguished by the consumer.
+    if (store.layoutSize(store.getLayout(idx)) <= 16) base.invariant("LP64 memory classification requires a value wider than two registers", .{});
+    // Like ARM, arguments pass a pointer without byval. Results use the
+    // existing leading sret pointer; LP64 assigns it to a0 rather than x8.
+    return .indirect;
 }
 
 fn placementAarch64(
@@ -1448,4 +1553,73 @@ test "markRegisterOverflow leaves trailing pointers their registers" {
     try std.testing.expectEqualSlices(bool, &.{ false, false, false, false, true, true, true }, overflow[0..7]);
     markRegisterOverflow(.aarch64_macho, .{ .leading_ops = false, .ret = .indirect, .args = &aarch64_args }, 2, overflow[0..7]);
     try std.testing.expectEqualSlices(bool, &.{ false, false, false, false, false, true, true }, overflow[0..7]);
+}
+
+test "LP64 lowering: scalar widening and transparent enums" {
+    var store = try Store.init(testing.allocator, .u64);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const wrapped = try store.putTagUnion(&.{.u32});
+    const pointer = try store.insertPtr(.u8);
+    const call = try lowerRiscv64(arena_state.allocator(), &store, &.{ .i8, .u8, .u16, .i32, .u32, wrapped, .bool, pointer, .zst }, .u32, false);
+    const extensions = [_]RegExtension{ .sign, .zero, .zero, .sign, .sign, .sign, .zero, .none };
+    for (extensions, call.args[0..extensions.len]) |extend, arg| {
+        try testing.expectEqual(extend, arg.registers.pieces[0].extend);
+        try testing.expectEqual(RegClass.integer, arg.registers.pieces[0].class);
+    }
+    try testing.expectEqual(RegExtension.sign, call.ret.registers.pieces[0].extend);
+    try testing.expect(call.args[8] == .none);
+}
+
+test "LP64 lowering: aggregates reuse ARM array packing with exact memory pieces" {
+    var store = try Store.init(testing.allocator, .u64);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const nine = try testStruct(&store, &.{ .u8, .u8, .u8, .u8, .u8, .u8, .u8, .u8, .u8 });
+    const pair = try testStruct(&store, &.{ .u64, .u64 });
+    const aligned = try testStruct(&store, &.{.i128});
+    const small = try testStruct(&store, &.{.u32});
+    const call = try lowerRiscv64(arena_state.allocator(), &store, &.{ nine, pair, aligned, .i128, .dec, .u8x16, small }, nine, false);
+    for ([_]Placement{ call.ret, call.args[0], call.args[1] }) |placement| {
+        try testing.expect(placement.registers.carrier == .array);
+        try testing.expectEqual(@as(?u8, null), placement.registers.carrier.array);
+    }
+    try testing.expectEqual(@as(u8, 8), call.ret.registers.pieces[0].size);
+    try testing.expectEqual(@as(u8, 1), call.ret.registers.pieces[1].size);
+    try testing.expectEqual(@as(u32, 8), call.ret.registers.pieces[1].offset);
+    for (call.args[2..6]) |placement| try testing.expect(placement.registers.carrier == .integer);
+    try testing.expect(call.args[6].registers.carrier == .piecewise);
+    try testing.expectEqual(RegExtension.none, call.args[6].registers.pieces[0].extend);
+}
+
+test "LP64 lowering: software float carrier stays float in integer registers" {
+    var store = try Store.init(testing.allocator, .u64);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const wrapped = try store.putTagUnion(&.{.f64});
+    const call = try lowerRiscv64(arena_state.allocator(), &store, &.{ .f32, .f64, wrapped }, .f32, false);
+    for (call.args) |arg| {
+        try testing.expectEqual(RegClass.integer, arg.registers.pieces[0].class);
+        try testing.expect(arg.registers.pieces[0].llvm_float != null);
+        try testing.expectEqual(RegExtension.none, arg.registers.pieces[0].extend);
+    }
+    try testing.expect(call.ret.registers.pieces[0].llvm_float.? == .f32);
+    try testing.expect(call.args[2].registers.pieces[0].llvm_float.? == .f64);
+}
+
+test "LP64 lowering: indirect results and exhaustion keep the natural LLVM signature" {
+    var store = try Store.init(testing.allocator, .u64);
+    defer store.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const pair = try testStruct(&store, &.{ .u64, .u64 });
+    const call = try lowerRiscv64(arena_state.allocator(), &store, &.{ .u64, .u64, .u64, .u64, .u64, .u64, pair, .str, .u32 }, .str, true);
+    try testing.expect(call.ret == .indirect);
+    try testing.expect(call.leading_ops);
+    try testing.expect(call.args[6].registers.carrier == .array);
+    try testing.expect(call.args[7] == .indirect);
+    try testing.expectEqual(RegExtension.sign, call.args[8].registers.pieces[0].extend);
 }

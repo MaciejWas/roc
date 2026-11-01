@@ -24336,8 +24336,24 @@ host feature detection. Its CPU contract explicitly excludes optional ISA
 extensions. Target registration does not imply code-generation support:
 LP64 layout classification consumes committed layouts and uses the standard
 integer calling convention, including integer-chunk transport for floats and
-fixed-length vectors. Call lowering and runtime integration remain unfinished
-and must not borrow another target's implementation or artifacts.
+fixed-length vectors. The staged LP64 LLVM call plan reuses AArch64's exact-byte
+piece packing and array carriers. A register piece records an explicit LLVM
+floating-point carrier when LP64 transports a scalar float in integer registers;
+consumers bitcast its bits rather than converting its numeric value. Named
+arguments retain their natural LLVM carriers under register exhaustion; LLVM
+assigns their register/stack splits and the leading indirect-result pointer.
+RISC-V tail groups use a single padded `fastcc` prototype and `musttail`, not
+`tailcc`. Direct argument pieces are normalized to i64 slots, with fixed pointer
+positions for indirect results, runtime result descriptors, and group storage.
+The group pads to its maximum direct slot count using zero values. At most twelve
+integer/pointer slots are passed, including hidden pointers: the bundled LLVM
+22.1.8 accepts twelve but rejects a musttail transfer with thirteen. Indirect arguments
+and whole arguments that exceed that budget use the existing caller-owned group
+storage; the storage pointer is reserved before assigning direct slots. Members
+copy stored arguments on entry before that storage is reused. Argument and return
+adapters preserve the external LP64 ABI. Self-tail loops and other targets keep
+their existing conventions. Runtime integration remains unfinished and must not
+borrow another target's artifacts.
 
 The program's hosted catalog retains every visible hosted declaration and
 classifies its platform binding as mapped or unavailable. Only mapped entries

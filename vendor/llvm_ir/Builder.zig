@@ -2452,6 +2452,10 @@ pub const FunctionAttributes = enum(u32) {
             try self.addAttr(function_index, attribute, builder);
         }
 
+        pub fn addReturnAttr(self: *Wip, attribute: Attribute, builder: *Builder) Allocator.Error!void {
+            try self.addAttr(return_index, attribute, builder);
+        }
+
         pub fn addParamAttr(
             self: *Wip,
             param_index: usize,
