@@ -556,6 +556,7 @@ pub const RocTarget = enum {
                     .macos, .windows, .freebsd, .openbsd, .netbsd, .other => return .arm32linux, // Generic ARM32 Linux
                 }
             },
+            .riscv64 => return .riscv64elf,
             .wasm32 => return .wasm32,
             .other => {
                 // Default fallback based on OS
@@ -734,7 +735,7 @@ pub const RocTarget = enum {
             .arm64v1glibc,
             => self.defaultCpuTarget(),
 
-            .arm32linux, .arm32musl, .wasm32, .wasm32v1 => null,
+            .arm32linux, .arm32musl, .wasm32, .wasm32v1, .riscv64elf => null,
         };
     }
 
@@ -843,6 +844,10 @@ pub const RocTarget = enum {
                 }
             else
                 .{},
+            .riscv64 => .{
+                .codegen_model = .{ .explicit = &std.Target.riscv.cpu.generic_rv64 },
+                .architecture_baseline_features = .empty,
+            },
             .arm, .other => .{},
         };
 
@@ -868,6 +873,10 @@ pub const RocTarget = enum {
                 // Advanced SIMD and floating point are mandatory in the
                 // application profile Roc targets at Armv8.0-A.
                 .aarch64, .aarch64_be => baseline.addFeature(@backingInt(std.Target.aarch64.Feature.neon)),
+                .riscv64 => {
+                    baseline.addFeature(@backingInt(std.Target.riscv.Feature.@"64bit"));
+                    baseline.addFeature(@backingInt(std.Target.riscv.Feature.i));
+                },
                 .wasm32 => {},
                 .arm, .other => unreachable, // cpuContract gives arm and other architectures no baseline features
             }
@@ -911,7 +920,7 @@ pub const RocTarget = enum {
                 }
             },
             .wasm32 => contract.instruction_features.addFeature(@backingInt(std.Target.wasm.Feature.simd128)),
-            .arm, .other => {},
+            .arm, .riscv64, .other => {},
         }
 
         return contract;
@@ -1182,6 +1191,9 @@ test "every target Roc raises the CPU floor for has a v1 twin" {
     // macOS runs on, so there is nothing below it to be locked out of.
     for (std.enums.values(RocTarget)) |target| {
         if (target.cpuLevel() != .default) continue;
+        // RV64I explicitly constrains Zig's richer baseline down to the base
+        // ISA. The dedicated RV64I contract test checks its exact feature set.
+        if (target == .riscv64elf) continue;
 
         const query = target.llvmTargetQuery();
         const names_model = switch (query.cpu_model) {
@@ -1332,4 +1344,15 @@ test "riscv64elf target metadata" {
     try std.testing.expectEqual(@as(?RocTarget, null), target.baselineCpuTarget());
     try std.testing.expect(!target.isDynamic());
     try std.testing.expect(!target.isWindows());
+}
+
+test "riscv64elf CPU contract is RV64I without optional extensions" {
+    const target = RocTarget.riscv64elf;
+    const query = target.llvmTargetQuery();
+    try std.testing.expectEqual(std.Target.Abi.none, query.abi.?);
+    var expected = std.Target.Cpu.Feature.Set.empty;
+    expected.addFeature(@backingInt(std.Target.riscv.Feature.@"64bit"));
+    expected.addFeature(@backingInt(std.Target.riscv.Feature.i));
+    expected.populateDependencies(std.Target.Cpu.Arch.riscv64.allFeaturesList());
+    try std.testing.expect(target.llvmTargetFeatures().eql(expected));
 }

@@ -146,6 +146,7 @@ pub const PhysicalCall = struct {
 /// even-register rule. X86-64 splits System V vs Windows; wasm's pointer width
 /// is reflected in the store's `targetUsize`.
 pub const Target = enum {
+    // TODO: Add riscv64_lp64 once placementRiscv64 and call-wide lowering work.
     /// AAPCS64 on ELF targets.
     aarch64,
     aarch64_macho,
@@ -709,6 +710,27 @@ fn integerPieces(
         };
     }
     return .{ .registers = .{ .pieces = pieces, .carrier = carrier } };
+}
+
+fn placementRiscv64(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    idx: Idx,
+    ctx: Context,
+) std.mem.Allocator.Error!Placement {
+    _ = arena;
+    _ = store;
+    _ = idx;
+    _ = ctx;
+    // TODO: Consume riscv64.classifyType and classifyIntegerExtension.
+    // TODO: Emit explicit integer register pieces and LLVM carriers, including
+    // software-float bit transport; extend RegExtension for the LP64 rules.
+    // TODO: Lower indirect results through a leading pointer consuming a0.
+    // TODO: Integrate with lower/markRegisterOverflow without SysV's
+    // whole-aggregate spill rule; LP64 permits register/stack splits.
+    // TODO: Extend PhysicalArg and assignPhysicalArgs when implementing a
+    // native consumer: PhysicalArg currently cannot describe those splits.
+    @panic("TODO: implement RISC-V LP64 call placements");
 }
 
 fn placementAarch64(

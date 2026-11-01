@@ -18,6 +18,9 @@ pub const aarch64 = @import("aarch64.zig");
 pub const x86_64 = @import("x86_64.zig");
 pub const wasm = @import("wasm.zig");
 
+/// LP64 contract sketch; not yet a supported call.Target or classifier.
+pub const riscv64 = @import("riscv64.zig");
+
 pub const call = @import("call.zig");
 pub const LoweredCall = call.LoweredCall;
 pub const Placement = call.Placement;
