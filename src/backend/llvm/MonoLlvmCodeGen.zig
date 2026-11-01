@@ -204,12 +204,13 @@ fn getLlvmTriple(target: std.Target) []const u8 {
         };
     }
     if (arch == .riscv32) return "riscv32-unknown-unknown";
-    if (arch == .riscv64) return "riscv64-unknown-unknown";
+    if (arch == .riscv64) return "riscv64-unknown-none-elf";
     return "unknown-unknown-unknown";
 }
 
 fn getLlvmDataLayout(target: std.Target) []const u8 {
     if (target.cpu.arch == .wasm32) return "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20";
+    if (target.cpu.arch == .riscv64 and target.os.tag == .freestanding) return "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128";
     if (target.cpu.arch == .x86_64) {
         return switch (target.os.tag) {
             .windows => "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
@@ -1955,6 +1956,7 @@ pub const MonoLlvmCodeGen = struct {
         /// Parameter index of the tail group's shared argument storage, and
         /// that storage's shape, if the group passes any argument in memory.
         scratch_index: ?u32,
+        padding_count: u32 = 0,
         scratch: TailScratch,
         /// Each argument's place in the tail group's storage (see `TailArgs`).
         tail_args: TailArgs,
@@ -1963,6 +1965,7 @@ pub const MonoLlvmCodeGen = struct {
     const TailScratch = struct {
         size: u32 = 0,
         alignment: u32 = 1,
+        riscv_direct_slots: u32 = 0,
     };
 
     /// How a procedure's arguments use its tail group's shared storage. A
@@ -1989,9 +1992,40 @@ pub const MonoLlvmCodeGen = struct {
         _ = self.abi_arena.reset(.retain_capacity);
     }
 
+    fn usesRiscvTailPrototype(self: *const MonoLlvmCodeGen, proc: LirProcSpec) bool {
+        return self.target.cpu.arch == .riscv64 and proc.tail_group != null;
+    }
+
+    fn lowerFastCall(self: *MonoLlvmCodeGen, arena: std.mem.Allocator, proc: LirProcSpec, args: []const layout.Idx) Error!layout.abi.LoweredCall {
+        var lowered = try layout.abi.lower(arena, self.layouts(), self.abiTarget(), args, fastRetLayout(proc), false);
+        if (self.usesRiscvTailPrototype(proc)) {
+            const normalized = try arena.dupe(layout.abi.Placement, lowered.args);
+            lowered.args = normalized;
+            for (normalized) |*arg| {
+                if (arg.* != .registers) continue;
+                const pieces = try arena.dupe(layout.abi.RegPiece, arg.registers.pieces);
+                for (pieces) |*piece| {
+                    piece.llvm_float = null;
+                    piece.llvm_integer_bits = 64;
+                    piece.extend = .none;
+                }
+                arg.* = .{ .registers = .{ .pieces = pieces } };
+            }
+        }
+        return lowered;
+    }
+
+    fn riscvDirectSlots(lowered: layout.abi.LoweredCall, stored: []const bool) u32 {
+        var count: u32 = 0;
+        for (lowered.args, stored) |arg, in_storage| {
+            if (!in_storage and arg == .registers) count += @intCast(arg.registers.pieces.len);
+        }
+        return count;
+    }
+
     fn computeFastSignature(self: *MonoLlvmCodeGen, arena: std.mem.Allocator, proc: LirProcSpec) Error!FastSignature {
         const owned = try self.procArgLayoutsIn(arena, proc, .explicit);
-        const lowered = layout.abi.lower(arena, self.layouts(), self.abiTarget(), owned, fastRetLayout(proc), false) catch return error.OutOfMemory;
+        const lowered = try self.lowerFastCall(arena, proc, owned);
         const group_scratch: TailScratch = if (proc.tail_group) |group| blk: {
             if (@backingInt(group) >= self.tail_scratch.items.len) llvmInvariantFmt("tail group {d} has no recorded argument storage", .{@backingInt(group)});
             break :blk self.tail_scratch.items[@backingInt(group)];
@@ -2006,6 +2040,11 @@ pub const MonoLlvmCodeGen = struct {
         for (lowered.args, tail_args.stored) |placement, stored| {
             if (!stored) cursor += fastPlacementParamCount(placement);
         }
+        const padding_count = if (self.usesRiscvTailPrototype(proc))
+            scratch.riscv_direct_slots - (cursor - args_start)
+        else
+            0;
+        cursor += padding_count;
         const dyn_result_index: ?u32 = if (proc.dyn_result != null) blk: {
             cursor += 1;
             break :blk cursor - 1;
@@ -2026,6 +2065,7 @@ pub const MonoLlvmCodeGen = struct {
             .carry_index = carry_index,
             .pending_index = pending_index,
             .scratch_index = if (scratch.size > 0) cursor else null,
+            .padding_count = padding_count,
             .scratch = scratch,
             .tail_args = tail_args,
         };
@@ -2063,7 +2103,21 @@ pub const MonoLlvmCodeGen = struct {
                 layout.abi.markRegisterOverflow(self.abiTarget(), lowered, trailing_pointers + 1, stored);
             }
         } else if (proc.tail_group != null) {
-            layout.abi.markRegisterOverflow(self.abiTarget(), lowered, trailing_pointers + @intFromBool(group_storage), stored);
+            if (self.usesRiscvTailPrototype(proc)) {
+                var used: u32 = @intFromBool(lowered.ret == .indirect) + trailing_pointers + @intFromBool(group_storage);
+                for (lowered.args, stored) |arg, *in_storage| {
+                    switch (arg) {
+                        .none => {},
+                        .indirect => in_storage.* = true,
+                        .registers => |registers| {
+                            const count: u32 = @intCast(registers.pieces.len);
+                            if (used + count <= 12) used += count else in_storage.* = true;
+                        },
+                    }
+                }
+            } else {
+                layout.abi.markRegisterOverflow(self.abiTarget(), lowered, trailing_pointers + @intFromBool(group_storage), stored);
+            }
         } else {
             // Arguments past the registers travel in storage the caller owns,
             // through one pointer, rather than each in its own stack slot:
@@ -2121,6 +2175,11 @@ pub const MonoLlvmCodeGen = struct {
         var arena_state = Base.SingleThreadArena.init(self.allocator);
         defer arena_state.deinit();
         for ([_]bool{ false, true }) |group_storage| {
+            if (group_storage) {
+                for (self.tail_scratch.items, needs_storage) |*entry, needed| {
+                    if (needed) entry.riscv_direct_slots = 0;
+                }
+            }
             for (procs) |proc| {
                 const group = proc.tail_group orelse continue;
                 if (proc.is_static_initializer or !fastAbiEligible(proc)) continue;
@@ -2129,13 +2188,17 @@ pub const MonoLlvmCodeGen = struct {
                 const arena = arena_state.allocator();
                 const arg_layouts = try self.procArgLayouts(proc, .explicit);
                 defer self.allocator.free(arg_layouts);
-                const lowered = layout.abi.lower(arena, self.layouts(), self.abiTarget(), arg_layouts, fastRetLayout(proc), false) catch return error.OutOfMemory;
+                const lowered = try self.lowerFastCall(arena, proc, arg_layouts);
                 const tail_args = try self.tailArgs(arena, proc, lowered, arg_layouts, group_storage);
-                if (!group_storage) {
-                    if (tail_args.scratch.size > 0) needs_storage[@backingInt(group)] = true;
+                if (!group_storage and tail_args.scratch.size > 0) {
+                    needs_storage[@backingInt(group)] = true;
                     continue;
                 }
+                if (!group_storage and needs_storage[@backingInt(group)]) continue;
                 const entry = &self.tail_scratch.items[@backingInt(group)];
+                if (self.usesRiscvTailPrototype(proc)) {
+                    entry.riscv_direct_slots = @max(entry.riscv_direct_slots, riscvDirectSlots(lowered, tail_args.stored));
+                }
                 entry.size = @max(entry.size, tail_args.scratch.size);
                 entry.alignment = @max(entry.alignment, tail_args.scratch.alignment);
             }
@@ -2412,14 +2475,15 @@ pub const MonoLlvmCodeGen = struct {
 
     /// The calling convention of `proc`'s register-passing function. `tailcc`
     /// guarantees a `musttail` call between functions of different
-    /// signatures, which only tail-group members make or receive;
-    /// WebAssembly has no such convention. Every other procedure uses
+    /// signatures, which only tail-group members make or receive. RISC-V
+    /// instead uses matching padded fastcc prototypes; WebAssembly uses tail
+    /// drivers. Every other procedure uses
     /// `fastcc`, whose caller pops any stack-passed arguments: a `tailcc`
     /// callee pops them itself, and LLVM's AArch64 backend can address a
     /// spill reload placed between that call and the caller's stack
     /// readjustment from the stack pointer before the pop (#12191).
     fn fastCallConv(self: *const MonoLlvmCodeGen, proc: LirProcSpec) LlvmBuilder.CallConv {
-        if (self.target.cpu.arch.isWasm() or proc.tail_group == null) return .fastcc;
+        if (self.target.cpu.arch.isWasm() or self.target.cpu.arch == .riscv64 or proc.tail_group == null) return .fastcc;
         return .tailcc;
     }
 
@@ -2515,7 +2579,9 @@ pub const MonoLlvmCodeGen = struct {
             .none => {},
             .indirect => {
                 const r_ty = try self.memoryLlvmTypeForLayout(builder, proc.ret_layout);
-                try attrs_wip.addParamAttr(param_types.items.len, .{ .sret = r_ty }, builder);
+                if (!self.usesRiscvTailPrototype(proc)) {
+                    try attrs_wip.addParamAttr(param_types.items.len, .{ .sret = r_ty }, builder);
+                }
                 try attrs_wip.addParamAttr(param_types.items.len, .@"noalias", builder);
                 try param_types.append(self.allocator, ptr_ty);
             },
@@ -2535,6 +2601,7 @@ pub const MonoLlvmCodeGen = struct {
                 .registers => |registers| try self.appendCAbiRegisterParamTypes(builder, &attrs_wip, &param_types, registers),
             }
         }
+        try self.appendFastPadding(sig, &param_types, null);
         if (sig.dyn_result_index != null) try param_types.append(self.allocator, ptr_ty);
         if (sig.carry_index != null) try param_types.append(self.allocator, ptr_ty);
         if (sig.pending_index != null) try param_types.append(self.allocator, ptr_ty);
@@ -2560,6 +2627,13 @@ pub const MonoLlvmCodeGen = struct {
         }
         func.setAttributes(attrs_wip.finish(builder) catch return error.OutOfMemory, builder);
         try self.fast_registry.put(@backingInt(proc_id), func);
+    }
+
+    fn appendFastPadding(self: *MonoLlvmCodeGen, sig: *const FastSignature, types: *std.ArrayList(LlvmBuilder.Type), values: ?*std.ArrayList(LlvmBuilder.Value)) Error!void {
+        for (0..sig.padding_count) |_| {
+            try types.append(self.allocator, .i64);
+            if (values) |args| try args.append(self.allocator, try self.intValue(.i64, 0));
+        }
     }
 
     /// Bind the fast function's parameters to the procedure's parameters:
@@ -2675,6 +2749,7 @@ pub const MonoLlvmCodeGen = struct {
                 .registers => |registers| try self.appendCAbiRegisterCallArg(builder, &attrs_wip, &param_types, &call_args, registers, .{ .memory = try self.offsetPtr(args_ptr, offset) }, arg_layout),
             }
         }
+        try self.appendFastPadding(sig, &param_types, &call_args);
         if (sig.dyn_result_index != null) {
             // The result pointer is the dynamic result's storage.
             try param_types.append(self.allocator, ptr_ty);
@@ -3185,6 +3260,7 @@ pub const MonoLlvmCodeGen = struct {
             .registers => |registers| {
                 ret_registers = registers;
                 ret_ty = try self.cAbiRegisterCarrierType(builder, registers);
+                try self.addCAbiReturnAttrs(builder, &attrs_wip, registers);
             },
         }
 
@@ -4884,6 +4960,7 @@ pub const MonoLlvmCodeGen = struct {
                 },
             }
         }
+        try self.appendFastPadding(sig, param_types, call_args);
         if (sig.dyn_result_index != null) {
             try param_types.append(self.allocator, ptr_ty);
             try call_args.append(self.allocator, target_storage orelse self.slot(target).ptr);
@@ -4983,6 +5060,7 @@ pub const MonoLlvmCodeGen = struct {
                 },
             }
         }
+        try self.appendFastPadding(sig, param_types, call_args);
         if (sig.dyn_result_index != null) {
             // The callee writes its result where this procedure's caller
             // asked for this procedure's.
@@ -14032,6 +14110,7 @@ pub const MonoLlvmCodeGen = struct {
     /// The C-ABI target this build is compiling for.
     fn abiTarget(self: *const MonoLlvmCodeGen) layout.abi.Target {
         const arch = self.target.cpu.arch;
+        if (arch == .riscv64) return .riscv64_lp64;
         if (arch == .aarch64 or arch == .aarch64_be) {
             return layout.abi.aarch64Target(self.target.os.tag);
         } else if (arch == .x86_64) {
@@ -14071,7 +14150,12 @@ pub const MonoLlvmCodeGen = struct {
     /// and returns travel as i32 values with explicit extension/truncation at
     /// the ABI boundary.
     fn cAbiPieceLlvmType(self: *MonoLlvmCodeGen, builder: *LlvmBuilder, piece: layout.abi.RegPiece) Error!LlvmBuilder.Type {
-        if ((self.abiTarget() == .wasm32 or self.abiTarget() == .wasm32v1 or self.abiTarget() == .wasm64) and
+        if (piece.llvm_integer_bits) |bits| return builder.intType(@intCast(bits)) catch return error.OutOfMemory;
+        if (piece.llvm_float) |precision| return switch (precision) {
+            .f32 => .float,
+            .f64 => .double,
+        };
+        if (self.target.cpu.arch.isWasm() and
             piece.class == .integer and piece.size < 4)
         {
             return .i32;
@@ -14080,8 +14164,7 @@ pub const MonoLlvmCodeGen = struct {
     }
 
     fn cAbiPieceIsSigned(self: *MonoLlvmCodeGen, layout_idx: layout.Idx) bool {
-        const abi_target = self.abiTarget();
-        const direct_idx = if (abi_target == .wasm32 or abi_target == .wasm32v1 or abi_target == .wasm64)
+        const direct_idx = if (self.target.cpu.arch.isWasm())
             switch (layout.abi.wasm.classifyType(self.layouts(), layout_idx)) {
                 .direct => |idx| idx,
                 .indirect => layout_idx,
@@ -14116,7 +14199,7 @@ pub const MonoLlvmCodeGen = struct {
     ) Error!LlvmBuilder.Value {
         const wip = self.wip orelse return error.CompilationFailed;
         if (value.typeOfWip(wip) == target_ty) return value;
-        if (piece.class == .vector) {
+        if (piece.class == .vector or piece.llvm_float != null) {
             return wip.cast(.bitcast, value, target_ty, "") catch return error.OutOfMemory;
         }
         return self.coerceScalar(value, target_ty, signed);
@@ -14164,6 +14247,15 @@ pub const MonoLlvmCodeGen = struct {
         };
     }
 
+    fn addCAbiReturnAttrs(self: *MonoLlvmCodeGen, builder: *LlvmBuilder, attrs: *LlvmBuilder.FunctionAttributes.Wip, registers: layout.abi.RegisterPlacement) Error!void {
+        if (self.target.cpu.arch != .riscv64 or registers.carrier != .piecewise or registers.pieces.len != 1) return;
+        switch (registers.pieces[0].extend) {
+            .none => {},
+            .zero => try attrs.addReturnAttr(.zeroext, builder),
+            .sign => try attrs.addReturnAttr(.signext, builder),
+        }
+    }
+
     fn appendCAbiRegisterParamTypes(
         self: *MonoLlvmCodeGen,
         builder: *LlvmBuilder,
@@ -14173,6 +14265,11 @@ pub const MonoLlvmCodeGen = struct {
     ) Error!void {
         switch (registers.carrier) {
             .piecewise => for (registers.pieces) |piece| {
+                if (self.target.cpu.arch == .riscv64) switch (piece.extend) {
+                    .none => {},
+                    .zero => try attrs.addParamAttr(param_types.items.len, .zeroext, builder),
+                    .sign => try attrs.addParamAttr(param_types.items.len, .signext, builder),
+                };
                 try param_types.append(self.allocator, try self.cAbiPieceLlvmType(builder, piece));
             },
             .structure, .integer, .array => {
@@ -14626,6 +14723,7 @@ pub const MonoLlvmCodeGen = struct {
             .registers => |registers| {
                 ret_registers = registers;
                 ret_ty = try self.cAbiRegisterCarrierType(builder, registers);
+                try self.addCAbiReturnAttrs(builder, &attrs_wip, registers);
             },
         }
 
@@ -16018,4 +16116,197 @@ test "wasm C-ABI classification follows the target's SIMD support" {
         defer codegen.deinit();
         try std.testing.expectEqual(case.abi, codegen.abiTarget());
     }
+}
+
+test "LP64 LLVM carriers reuse ARM exact-byte packing and bitcast software floats" {
+    const allocator = std.testing.allocator;
+    var store = lir.LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, .u64);
+    defer layouts.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var fields: [9]layout.StructField = undefined;
+    for (&fields, 0..) |*field, i| field.* = .{ .index = @intCast(i), .layout = .u8 };
+    const nine = try layouts.putStructFields(&fields);
+
+    var codegen = MonoLlvmCodeGen.init(allocator, &store, &.{}, &.{}, &.{});
+    defer codegen.deinit();
+    codegen.layout_store = &layouts;
+    var builder = try codegen.createBuilder("lp64_carrier_roundtrips");
+    defer builder.deinit();
+    codegen.builder = &builder;
+    defer codegen.builder = null;
+
+    for ([_]layout.Idx{ nine, .f32, .f64 }, [_][]const u8{ "lp64_nine", "lp64_float", "lp64_double" }) |idx, name| {
+        const plan = try layout.abi.call.lowerRiscv64(arena, &layouts, &.{idx}, idx, false);
+        const carrier = try codegen.cAbiRegisterCarrierType(&builder, plan.ret.registers);
+        const ptr_ty = try builder.ptrType(.default);
+        const function = try builder.addFunction(
+            try builder.fnType(carrier, &.{ carrier, ptr_ty }, .normal),
+            try builder.strtabString(name),
+            .default,
+        );
+        var wip = try LlvmBuilder.WipFunction.init(&builder, .{ .function = function, .strip = true });
+        defer wip.deinit();
+        codegen.wip = &wip;
+        defer codegen.wip = null;
+        const entry = try wip.block(0, "entry");
+        wip.cursor = .{ .block = entry };
+        var cursor: u32 = 0;
+        const destination = wip.arg(1);
+        try codegen.storeCAbiRegisterParam(&builder, plan.args[0].registers, &cursor, destination, idx);
+        try std.testing.expectEqual(@as(u32, 1), cursor);
+        const result = try codegen.loadCAbiRegisterResult(&builder, plan.ret.registers, .{ .memory = destination }, idx);
+        _ = try wip.ret(result);
+        try codegen.finishCurrentWipFunction();
+    }
+    var ir: std.Io.Writer.Allocating = .init(allocator);
+    defer ir.deinit();
+    try builder.print(&ir.writer);
+    // The ninth byte must be read/written as one byte, even though LLVM's
+    // signature uses two full i64s. The same array path serves AArch64.
+    try std.testing.expect(std.mem.find(u8, ir.written(), "[2 x i64] @lp64_nine") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "store i8 ") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "load i8,") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "load [2 x i64]") == null);
+    // Software-float transport preserves bits instead of doing integer/float
+    // arithmetic conversions in either direction.
+    try std.testing.expect(std.mem.find(u8, ir.written(), "float @lp64_float(float") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "double @lp64_double(double") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "bitcast float") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "bitcast i32") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "bitcast double") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "bitcast i64") != null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "sitofp") == null);
+    try std.testing.expect(std.mem.find(u8, ir.written(), "uitofp") == null);
+}
+
+fn testRiscvPaddedTailGroup(arities: [2]usize, param_layout: layout.Idx, ret_layout: layout.Idx) !void {
+    const allocator = std.testing.allocator;
+    var store = lir.LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, .u64);
+    defer layouts.deinit();
+    var proc_ids: [2]LirProcSpecId = undefined;
+    var params: [2][]LocalId = undefined;
+    var results: [2]LocalId = undefined;
+    for (arities, 0..) |arity, i| {
+        params[i] = try allocator.alloc(LocalId, arity);
+        for (params[i]) |*param| param.* = try store.addLocal(.{ .layout_idx = param_layout });
+        results[i] = try store.addLocal(.{ .layout_idx = ret_layout });
+        proc_ids[i] = try store.addProcSpec(.{
+            .name = .fromRaw(@intCast(i + 1)),
+            .identity = lir.LIR.ProcIdentity.forTest(@intCast(i + 1)),
+            .args = try store.addLocalSpan(params[i]),
+            .frame_locals = try store.addLocalSpan(&.{results[i]}),
+            .ret_layout = ret_layout,
+            .tail_group = @fromBackingInt(@intCast(0)),
+        }, .none);
+    }
+    defer for (params) |locals| allocator.free(locals);
+    for (0..2) |i| {
+        const target_args = try allocator.alloc(LocalId, arities[1 - i]);
+        defer allocator.free(target_args);
+        for (target_args, 0..) |*arg, index| arg.* = params[i][index % params[i].len];
+        const next = try store.addCFStmt(.{ .ret = .{ .value = results[i] } }, .test_fixture);
+        const body = try store.addCFStmt(.{ .assign_call = .{
+            .target = results[i],
+            .proc = proc_ids[1 - i],
+            .args = try store.addLocalSpan(target_args),
+            .next = next,
+            .extra = try store.addStmtRow(lir.LIR.CallExtra, .{ .replaces_frame = true }),
+        } }, .test_fixture);
+        store.getProcSpecPtr(proc_ids[i]).body = body;
+    }
+    const target = try std.zig.system.resolveTargetQuery(std.testing.io, roc_target.RocTarget.riscv64elf.llvmTargetQuery());
+    var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, &.{}, &.{}, &.{}, target);
+    defer codegen.deinit();
+    codegen.layout_store = &layouts;
+    var builder = try codegen.createBuilder("riscv_padded_tail_group");
+    defer builder.deinit();
+    codegen.builder = &builder;
+    defer codegen.builder = null;
+    try codegen.compileAllProcSpecs(store.getProcSpecs());
+    const first = codegen.fast_registry.get(@backingInt(proc_ids[0])).?;
+    const second = codegen.fast_registry.get(@backingInt(proc_ids[1])).?;
+    try std.testing.expectEqual(first.typeOf(&builder), second.typeOf(&builder));
+    for (proc_ids) |id| {
+        const sig = codegen.fastSignatureOf(id);
+        var count: usize = sig.args_start + sig.padding_count + @as(usize, @intFromBool(sig.dyn_result_index != null)) + @intFromBool(sig.carry_index != null) + @intFromBool(sig.scratch_index != null);
+        for (sig.lowered.args, sig.tail_args.stored) |arg, stored| {
+            if (!stored and arg == .registers) count += arg.registers.pieces.len;
+        }
+        try std.testing.expect(count <= 12);
+    }
+    var ir: std.Io.Writer.Allocating = .init(allocator);
+    defer ir.deinit();
+    try builder.print(&ir.writer);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir.written(), "musttail call fastcc"));
+    try std.testing.expect(std.mem.find(u8, ir.written(), "tailcc") == null);
+}
+
+test "RISC-V padded fastcc tail groups share a prototype across different arities" {
+    try testRiscvPaddedTailGroup(.{ 1, 3 }, .i64, .i64);
+}
+
+test "RISC-V padded fastcc tail groups store overflow outside the replaced frame" {
+    try testRiscvPaddedTailGroup(.{ 2, 14 }, .i64, .i64);
+}
+
+test "RISC-V padded fastcc tail groups normalize float bits and wide integers" {
+    try testRiscvPaddedTailGroup(.{ 1, 3 }, .f32, .f32);
+    try testRiscvPaddedTailGroup(.{ 2, 7 }, .i128, .i128);
+}
+
+test "RISC-V padded fastcc tail groups reserve indirect result and storage pointers" {
+    try testRiscvPaddedTailGroup(.{ 2, 14 }, .i64, .str);
+    try testRiscvPaddedTailGroup(.{ 1, 3 }, .str, .str);
+}
+
+test "RISC-V LP64 platform wrappers preserve C signatures and extension attributes" {
+    const allocator = std.testing.allocator;
+    var store = lir.LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, .u64);
+    defer layouts.deinit();
+    var fields: [9]layout.StructField = undefined;
+    for (&fields, 0..) |*field, i| field.* = .{ .index = @intCast(i), .layout = .u8 };
+    const nine = try layouts.putStructFields(&fields);
+    var procs: [3]LirProcSpecId = undefined;
+    const value_layouts = [_]layout.Idx{ .u32, .f32, nine };
+    for (value_layouts, 0..) |idx, i| {
+        const param = try store.addLocal(.{ .layout_idx = idx });
+        const body = try store.addCFStmt(.{ .ret = .{ .value = param } }, .test_fixture);
+        procs[i] = try store.addProcSpec(.{
+            .name = .fromRaw(@intCast(i + 1)),
+            .identity = lir.LIR.ProcIdentity.forTest(@intCast(i + 1)),
+            .args = try store.addLocalSpan(&.{param}),
+            .ret_layout = idx,
+            .body = body,
+        }, .none);
+    }
+    const target = try std.zig.system.resolveTargetQuery(std.testing.io, roc_target.RocTarget.riscv64elf.llvmTargetQuery());
+    var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, &.{}, &.{}, &.{}, target);
+    defer codegen.deinit();
+    codegen.layout_store = &layouts;
+    var builder = try codegen.createBuilder("riscv_c_abi_wrappers");
+    defer builder.deinit();
+    codegen.builder = &builder;
+    defer codegen.builder = null;
+    try codegen.compileAllProcSpecs(store.getProcSpecs());
+    const names = [_][]const u8{ "lp64_export_u32", "lp64_export_float", "lp64_export_nine" };
+    for (procs, value_layouts, names) |proc, idx, name| {
+        try codegen.generateCAbiEntrypointWrapper(name, proc, &.{idx}, idx, null);
+    }
+    var ir: std.Io.Writer.Allocating = .init(allocator);
+    defer ir.deinit();
+    try builder.print(&ir.writer);
+    const u32_ir = printedFunction(ir.written(), names[0]) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.find(u8, u32_ir, "signext i32 @lp64_export_u32(i32 signext") != null);
+    const float_ir = printedFunction(ir.written(), names[1]) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.find(u8, float_ir, "float @lp64_export_float(float") != null);
+    const nine_ir = printedFunction(ir.written(), names[2]) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.find(u8, nine_ir, "[2 x i64] @lp64_export_nine([2 x i64]") != null);
 }
