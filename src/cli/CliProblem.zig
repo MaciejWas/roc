@@ -232,6 +232,7 @@ pub const CliProblem = union(enum) {
     /// The builtin platform cannot satisfy this target's runtime contract.
     unsupported_default_platform_target: struct {
         target: []const u8,
+        reason: enum { missing_sysroot, platform_required } = .missing_sysroot,
     },
 
     /// A stack-first wasm platform's maximum memory reaches the addresses a
@@ -1135,11 +1136,14 @@ fn createUnsupportedDefaultPlatformTargetReport(allocator: Allocator, info: anyt
     defer allocator.free(headline);
     var report = try Report.init(allocator, "Unsupported Default Platform Target", headline, .fatal);
 
-    try report.document.addText(
-        "OpenBSD requires its system C runtime for process startup and kernel calls. " ++
+    try report.document.addText(switch (info.reason) {
+        .missing_sysroot => "OpenBSD requires its system C runtime for process startup and kernel calls. " ++
             "Roc does not ship an OpenBSD sysroot, so the builtin platform cannot cross-link this target. " ++
             "Use an app with an OpenBSD platform and build it natively on OpenBSD.",
-    );
+        .platform_required => "This embedded target requires a platform that supplies startup code, allocation, " ++
+            "task-local storage, and the recursive runtime lock. Use an app that declares such a platform, " ++
+            "as in examples/qemu-freertos/main.roc.",
+    });
 
     return report;
 }

@@ -6,6 +6,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Platform callbacks required in addition to the common six-symbol host ABI.
+pub const RuntimeAbi = enum {
+    standard,
+    /// Per-task state and a platform-wide recursive execution lock.
+    task_local,
+};
+
+/// Runtime ABI for a resolved target, including compiler-internal targets.
+pub fn runtimeAbiForTarget(arch: std.Target.Cpu.Arch, os: std.Target.Os.Tag) RuntimeAbi {
+    return if (os == .freestanding and !arch.isWasm()) .task_local else .standard;
+}
+
 /// CPU architecture categories used by Roc's target-selection logic.
 pub const CpuArchClass = enum { x86_64, aarch64, aarch64_be, arm, wasm32, riscv64, other };
 
@@ -692,6 +704,35 @@ pub const RocTarget = enum {
         };
     }
 
+    /// Platform runtime contract used by code generation and host validation.
+    pub fn runtimeAbi(self: RocTarget) RuntimeAbi {
+        return runtimeAbiForTarget(self.toCpuArch(), self.toOsTag());
+    }
+
+    /// Native builtin bitcode whose compile-time platform choices must be
+    /// preserved. Other targets use the portable word-size payloads.
+    pub fn llvmBuiltinRuntimeTarget(self: RocTarget) ?RocTarget {
+        return switch (self.runtimeAbi()) {
+            .standard => null,
+            .task_local => self.defaultCpuTarget(),
+        };
+    }
+
+    pub fn supportsLlvm(self: RocTarget) bool {
+        return switch (classifyCpuArch(self.toCpuArch())) {
+            .x86_64, .aarch64, .wasm32, .riscv64 => true,
+            .aarch64_be, .arm, .other => false,
+        };
+    }
+
+    /// RISC-V medany permits firmware anywhere in a single 2 GiB window.
+    pub fn llvmCodeModel(self: RocTarget) std.builtin.CodeModel {
+        return switch (classifyCpuArch(self.toCpuArch())) {
+            .riscv64 => .medium,
+            .x86_64, .aarch64, .aarch64_be, .arm, .wasm32, .other => .default,
+        };
+    }
+
     /// The target whose LLVM private runtime (src/builtins/llvm_private_runtime.zig)
     /// a native LLVM object for this target links, or null for a target that
     /// has none. Every CPU level of a target shares one runtime, compiled for
@@ -1357,4 +1398,19 @@ test "riscv64elf CPU contract is RV64IA without other optional extensions" {
     expected.addFeature(@backingInt(std.Target.riscv.Feature.a));
     expected.populateDependencies(std.Target.Cpu.Arch.riscv64.allFeaturesList());
     try std.testing.expect(target.llvmTargetFeatures().eql(expected));
+}
+
+test "LLVM runtime policy is explicit for every Roc target" {
+    for (std.enums.values(RocTarget)) |target| {
+        if (target == .riscv64elf) {
+            try std.testing.expect(target.supportsLlvm());
+            try std.testing.expectEqual(RuntimeAbi.task_local, target.runtimeAbi());
+            try std.testing.expectEqual(target, target.llvmBuiltinRuntimeTarget().?);
+            try std.testing.expectEqual(std.builtin.CodeModel.medium, target.llvmCodeModel());
+        } else {
+            try std.testing.expectEqual(RuntimeAbi.standard, target.runtimeAbi());
+            try std.testing.expectEqual(@as(?RocTarget, null), target.llvmBuiltinRuntimeTarget());
+            try std.testing.expectEqual(std.builtin.CodeModel.default, target.llvmCodeModel());
+        }
+    }
 }
