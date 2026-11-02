@@ -3302,6 +3302,8 @@ pub const MonoLlvmCodeGen = struct {
         wip.cursor = .{ .block = entry };
         if (self.stack_checks) try self.emitStackCheck(wrapper);
 
+        try self.emitPlatformRuntimeLock(true);
+
         const ops_value = if (shim != null) blk: {
             // The interpreter needs a real RocOps; the prelinked shim builds
             // one over the host's extern symbols.
@@ -3360,8 +3362,11 @@ pub const MonoLlvmCodeGen = struct {
         }
 
         if (ret_registers) |registers| {
-            _ = wip.ret(try self.loadCAbiRegisterResult(builder, registers, .{ .memory = ret_slot }, ret_layout)) catch return error.OutOfMemory;
+            const result = try self.loadCAbiRegisterResult(builder, registers, .{ .memory = ret_slot }, ret_layout);
+            try self.emitPlatformRuntimeLock(false);
+            _ = wip.ret(result) catch return error.OutOfMemory;
         } else {
+            try self.emitPlatformRuntimeLock(false);
             _ = wip.retVoid() catch return error.OutOfMemory;
         }
 
@@ -3460,6 +3465,16 @@ pub const MonoLlvmCodeGen = struct {
         wip.cursor = .{ .block = entry };
         _ = wip.ret(stamp_var.toValue(builder)) catch return error.OutOfMemory;
         try self.finishCurrentWipFunction();
+    }
+
+    fn emitPlatformRuntimeLock(self: *MonoLlvmCodeGen, comptime acquire: bool) Error!void {
+        if (self.program_kind != .platform or self.target.os.tag != .freestanding or self.target.cpu.arch.isWasm()) return;
+        const builder = self.builder orelse return error.CompilationFailed;
+        const wip = self.wip orelse return error.CompilationFailed;
+        const fn_ty = builder.fnType(.void, &.{}, .normal) catch return error.OutOfMemory;
+        const symbol = if (acquire) shim_symbols.roc_acquire_runtime_lock else shim_symbols.roc_release_runtime_lock;
+        const function = try self.declareExternSymbol(symbol, fn_ty);
+        _ = wip.call(.normal, .ccc, .none, fn_ty, function.toValue(builder), &.{}, "") catch return error.OutOfMemory;
     }
 
     fn createBuilder(self: *MonoLlvmCodeGen, name: []const u8) Error!LlvmBuilder {
@@ -16274,8 +16289,8 @@ test "RISC-V LP64 platform wrappers preserve C signatures and extension attribut
     var fields: [9]layout.StructField = undefined;
     for (&fields, 0..) |*field, i| field.* = .{ .index = @intCast(i), .layout = .u8 };
     const nine = try layouts.putStructFields(&fields);
-    var procs: [3]LirProcSpecId = undefined;
-    const value_layouts = [_]layout.Idx{ .u32, .f32, nine };
+    var procs: [5]LirProcSpecId = undefined;
+    const value_layouts = [_]layout.Idx{ .u32, .f32, nine, .str, .zst };
     for (value_layouts, 0..) |idx, i| {
         const param = try store.addLocal(.{ .layout_idx = idx });
         const body = try store.addCFStmt(.{ .ret = .{ .value = param } }, .test_fixture);
@@ -16291,22 +16306,74 @@ test "RISC-V LP64 platform wrappers preserve C signatures and extension attribut
     var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, &.{}, &.{}, &.{}, target);
     defer codegen.deinit();
     codegen.layout_store = &layouts;
+    codegen.boxy_runtime_used = true;
     var builder = try codegen.createBuilder("riscv_c_abi_wrappers");
     defer builder.deinit();
     codegen.builder = &builder;
     defer codegen.builder = null;
     try codegen.compileAllProcSpecs(store.getProcSpecs());
-    const names = [_][]const u8{ "lp64_export_u32", "lp64_export_float", "lp64_export_nine" };
+    const names = [_][]const u8{ "lp64_export_u32", "lp64_export_float", "lp64_export_nine", "lp64_export_str", "lp64_export_unit" };
     for (procs, value_layouts, names) |proc, idx, name| {
         try codegen.generateCAbiEntrypointWrapper(name, proc, &.{idx}, idx, null);
     }
     var ir: std.Io.Writer.Allocating = .init(allocator);
     defer ir.deinit();
     try builder.print(&ir.writer);
+    for (names) |name| {
+        const wrapper_ir = printedFunction(ir.written(), name) orelse return error.TestUnexpectedResult;
+        const acquire = std.mem.find(u8, wrapper_ir, "call void @roc_acquire_runtime_lock()") orelse return error.TestUnexpectedResult;
+        const init = std.mem.find(u8, wrapper_ir, "call void @roc_boxy_init_embedded(") orelse return error.TestUnexpectedResult;
+        const release = std.mem.find(u8, wrapper_ir, "call void @roc_release_runtime_lock()") orelse return error.TestUnexpectedResult;
+        const ret = std.mem.find(u8, wrapper_ir[release..], "ret ") orelse return error.TestUnexpectedResult;
+        try std.testing.expect(acquire < init and init < release and ret > 0);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wrapper_ir, "call void @roc_acquire_runtime_lock()"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wrapper_ir, "call void @roc_release_runtime_lock()"));
+        // Once another task can enter, only the already materialized return
+        // value may be used: no result loads or runtime calls after release.
+        const after_release = wrapper_ir[release + "call void @roc_release_runtime_lock()".len ..];
+        try std.testing.expect(std.mem.find(u8, after_release, "load ") == null);
+        try std.testing.expect(std.mem.find(u8, after_release, "call ") == null);
+    }
     const u32_ir = printedFunction(ir.written(), names[0]) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.find(u8, u32_ir, "signext i32 @lp64_export_u32(i32 signext") != null);
     const float_ir = printedFunction(ir.written(), names[1]) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.find(u8, float_ir, "float @lp64_export_float(float") != null);
     const nine_ir = printedFunction(ir.written(), names[2]) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.find(u8, nine_ir, "[2 x i64] @lp64_export_nine([2 x i64]") != null);
+}
+
+test "platform runtime lock excludes hosted, Wasm, and compiler evaluation" {
+    const allocator = std.testing.allocator;
+    var store = lir.LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, .u64);
+    defer layouts.deinit();
+    const param = try store.addLocal(.{ .layout_idx = .u32 });
+    const body = try store.addCFStmt(.{ .ret = .{ .value = param } }, .test_fixture);
+    const proc = try store.addProcSpec(.{
+        .name = .fromRaw(1),
+        .identity = lir.LIR.ProcIdentity.forTest(1),
+        .args = try store.addLocalSpan(&.{param}),
+        .ret_layout = .u32,
+        .body = body,
+    }, .none);
+    const targets = [_]roc_target.RocTarget{ .x64musl, .arm64musl, .wasm32v1, .riscv64elf };
+    for (targets) |target_name| {
+        const target = try std.zig.system.resolveTargetQuery(std.testing.io, target_name.llvmTargetQuery());
+        var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, &.{}, &.{}, &.{}, target);
+        defer codegen.deinit();
+        codegen.layout_store = &layouts;
+        if (target_name == .riscv64elf) codegen.program_kind = .in_process;
+        var builder = try codegen.createBuilder("unlocked_entry");
+        defer builder.deinit();
+        codegen.builder = &builder;
+        defer codegen.builder = null;
+        try codegen.compileAllProcSpecs(store.getProcSpecs());
+        try codegen.generateCAbiEntrypointWrapper("unlocked", proc, &.{.u32}, .u32, null);
+        var ir: std.Io.Writer.Allocating = .init(allocator);
+        defer ir.deinit();
+        try builder.print(&ir.writer);
+        try std.testing.expect(std.mem.find(u8, ir.written(), "roc_acquire_runtime_lock") == null);
+        try std.testing.expect(std.mem.find(u8, ir.written(), "roc_release_runtime_lock") == null);
+    }
 }

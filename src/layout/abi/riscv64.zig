@@ -1,4 +1,4 @@
-//! RISC-V LP64 layout classification for little-endian, freestanding RV64I.
+//! RISC-V LP64 layout classification for little-endian, freestanding RV64IA.
 //! https://riscv-non-isa.github.io/riscv-elf-psabi-doc/#_integer_calling_convention
 
 const std = @import("std");

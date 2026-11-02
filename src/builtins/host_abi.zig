@@ -84,6 +84,25 @@ pub const extern_host = struct {
     pub const roc_crashed = @extern(ExternHostFns.roc_crashed, .{ .name = shim_symbols.roc_crashed });
 };
 
+/// Platform callbacks over one FreeRTOS task-local storage slot, initially null.
+/// Callbacks must not enter Roc. Interrupt-handler re-entry is unsupported.
+pub const extern_freestanding_host = struct {
+    /// One platform-wide recursive mutex. Acquire waits until it owns the lock;
+    /// both callbacks return normally only on success and never enter Roc.
+    pub const roc_acquire_runtime_lock = @extern(*const fn () callconv(.c) void, .{
+        .name = shim_symbols.roc_acquire_runtime_lock,
+    });
+    pub const roc_release_runtime_lock = @extern(*const fn () callconv(.c) void, .{
+        .name = shim_symbols.roc_release_runtime_lock,
+    });
+    pub const roc_get_task_state = @extern(*const fn () callconv(.c) ?*anyopaque, .{
+        .name = shim_symbols.roc_get_task_state,
+    });
+    pub const roc_set_task_state = @extern(*const fn (?*anyopaque) callconv(.c) void, .{
+        .name = shim_symbols.roc_set_task_state,
+    });
+};
+
 comptime {
     // extern_host and shim_symbols.runtime_set must list the same symbols in
     // the same order.

@@ -20,3 +20,8 @@ comptime {
     // the prebuilt object empty.
     if (static_lib != static_lib) unreachable; // a type always equals itself; the comparison only forces analysis
 }
+
+comptime {
+    if (@import("execution_context.zig").native_freestanding)
+        @export(&@import("execution_context.zig").cleanupTaskState, .{ .name = @import("shim_symbols.zig").roc_cleanup_task_state });
+}
