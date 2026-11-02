@@ -132,6 +132,7 @@ pub const TargetConfigResolveDiagnostic = struct {
 pub const TargetPathField = enum {
     inputs_dir,
     input_file,
+    linker_script,
 };
 
 /// Why a target path string cannot stay inside the platform directory.
@@ -190,6 +191,7 @@ pub const InvalidTargetPathDiagnostic = struct {
         const field_description = switch (self.field) {
             .inputs_dir => "The `inputs_dir`",
             .input_file => "This target input file",
+            .linker_script => "The `linker_script`",
         };
         const headline = try std.fmt.allocPrint(
             allocator,
@@ -219,6 +221,8 @@ pub const InvalidTargetPathDiagnostic = struct {
 pub const TargetConfigField = enum {
     inputs,
     output,
+    linker_script,
+    entry_point,
     exports,
     import_memory,
     minimum_memory,
@@ -230,6 +234,8 @@ pub const TargetConfigField = enum {
         const spellings = [_]struct { []const u8, TargetConfigField }{
             .{ "inputs", .inputs },
             .{ "output", .output },
+            .{ "linker_script", .linker_script },
+            .{ "entry_point", .entry_point },
             .{ "exports", .exports },
             .{ "import_memory", .import_memory },
             .{ "minimum_memory", .minimum_memory },
@@ -250,7 +256,7 @@ pub const TargetConfigField = enum {
     /// wasm target.
     pub fn wasmOnly(self: TargetConfigField) bool {
         return switch (self) {
-            .inputs, .output => false,
+            .inputs, .output, .linker_script, .entry_point => false,
             .exports, .import_memory, .minimum_memory, .maximum_memory, .initial_stack_size, .global_base => true,
         };
     }
@@ -261,6 +267,8 @@ pub const TargetEntryProblem = enum {
     unknown_field,
     duplicate_field,
     wasm_only_field,
+    elf_executable_only_field,
+    expected_nonempty_string,
     unknown_input,
     expected_input_files,
     expected_output_kind,
@@ -295,6 +303,8 @@ pub const InvalidTargetEntryDiagnostic = struct {
             .unknown_field => try std.fmt.allocPrint(allocator, "The {s} target has a field named `{s}`, which is not a target configuration field.", .{ target_name, self.field_name }),
             .duplicate_field => try std.fmt.allocPrint(allocator, "The {s} target sets `{s}` more than once.", .{ target_name, self.field_name }),
             .wasm_only_field => try std.fmt.allocPrint(allocator, "The {s} target sets `{s}`, which only applies to WebAssembly targets.", .{ target_name, self.field_name }),
+            .elf_executable_only_field => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` only applies to ELF executables.", .{ target_name, self.field_name }),
+            .expected_nonempty_string => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` must be a non-empty string without NUL bytes.", .{ target_name, self.field_name }),
             .unknown_input => try std.fmt.allocPrint(allocator, "The {s} target's inputs include `{s}`, which is not a known input.", .{ target_name, self.field_name }),
             .expected_input_files => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` must be a list of input files.", .{ target_name, self.field_name }),
             .expected_output_kind => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` must be `Exe`, `Archive`, or `Shared`.", .{ target_name, self.field_name }),
@@ -310,13 +320,15 @@ pub const InvalidTargetEntryDiagnostic = struct {
         errdefer report.deinit();
         switch (self.problem) {
             .unknown_field => try report.document.addReflowingTextWithBackticks(
-                "A target's fields are `inputs` and `output`, and on WebAssembly targets also `exports`, `import_memory`, `minimum_memory`, `maximum_memory`, `initial_stack_size`, and `global_base`.",
+                "A target's fields are `inputs` and `output`, on ELF executables also `linker_script` and `entry_point`, and on WebAssembly targets also `exports`, `import_memory`, `minimum_memory`, `maximum_memory`, `initial_stack_size`, and `global_base`.",
             ),
             .unknown_input => try report.document.addReflowingTextWithBackticks(
                 "Each input is a file path string, `app` for the compiled application, or `win_gui`.",
             ),
             .duplicate_field,
             .wasm_only_field,
+            .elf_executable_only_field,
+            .expected_nonempty_string,
             .expected_input_files,
             .expected_output_kind,
             .expected_export_names,
@@ -357,6 +369,17 @@ pub const TargetsConfigDiagnostic = union(enum) {
     }
 };
 
+/// ELF firmware settings. The script path is relative to inputs_dir/<target>/.
+pub const ElfTargetConfig = struct {
+    linker_script: ?[]const u8 = null,
+    entry_point: ?[]const u8 = null,
+
+    fn deinit(self: ElfTargetConfig, allocator: Allocator) void {
+        if (self.linker_script) |path| allocator.free(path);
+        if (self.entry_point) |name| allocator.free(name);
+    }
+};
+
 /// Link specification for a single target.
 /// Contains the artifact kind and the ordered list of items to link for this target.
 pub const TargetLinkSpec = struct {
@@ -364,8 +387,10 @@ pub const TargetLinkSpec = struct {
     output: OutputKind,
     items: []const LinkItem,
     wasm: ?WasmTargetConfig = null,
+    elf: ?ElfTargetConfig = null,
 
     fn hasDeclaredTargetFiles(self: TargetLinkSpec) bool {
+        if (self.elf) |elf| if (elf.linker_script != null) return true;
         for (self.items) |item| {
             switch (item) {
                 .file_path => return true,
@@ -378,6 +403,7 @@ pub const TargetLinkSpec = struct {
 
 fn freeLinkSpec(allocator: Allocator, spec: TargetLinkSpec) void {
     if (spec.wasm) |wasm| wasm.deinit(allocator);
+    if (spec.elf) |elf| elf.deinit(allocator);
     for (spec.items) |item| switch (item) {
         .file_path => |fp| allocator.free(fp),
         .app, .win_gui => {},
@@ -482,26 +508,25 @@ pub const TargetsConfig = struct {
         }
 
         const target_name = @tagName(spec.target);
-        for (spec.items) |item| {
-            switch (item) {
-                .file_path => |path| {
-                    const full_path = try std.fs.path.join(allocator, &.{ platform_dir, inputs_dir, target_name, path });
-                    var full_path_owned = true;
-                    defer if (full_path_owned) allocator.free(full_path);
-
-                    if (!filesystem.fileExists(full_path)) {
-                        try issues.append(allocator, .{
-                            .missing_target_file = .{
-                                .target = spec.target,
-                                .output = spec.output,
-                                .file_path = path,
-                                .expected_full_path = full_path,
-                            },
-                        });
-                        full_path_owned = false;
-                    }
-                },
-                .app, .win_gui => {},
+        var paths = std.ArrayList([]const u8).empty;
+        defer paths.deinit(allocator);
+        for (spec.items) |item| switch (item) {
+            .file_path => |path| try paths.append(allocator, path),
+            .app, .win_gui => {},
+        };
+        if (spec.elf) |elf| if (elf.linker_script) |path| try paths.append(allocator, path);
+        for (paths.items) |path| {
+            const full_path = try std.fs.path.join(allocator, &.{ platform_dir, inputs_dir, target_name, path });
+            var full_path_owned = true;
+            defer if (full_path_owned) allocator.free(full_path);
+            if (!filesystem.fileExists(full_path)) {
+                try issues.append(allocator, .{ .missing_target_file = .{
+                    .target = spec.target,
+                    .output = spec.output,
+                    .file_path = path,
+                    .expected_full_path = full_path,
+                } });
+                full_path_owned = false;
             }
         }
 
@@ -676,6 +701,7 @@ pub const TargetsConfig = struct {
     const ParsedTargetConfig = struct {
         output: OutputKind,
         wasm: ?WasmTargetConfig,
+        elf: ?ElfTargetConfig,
     };
 
     /// Parse one target entry's config record. Every field must be a known
@@ -697,6 +723,8 @@ pub const TargetsConfig = struct {
         var output: OutputKind = .exe;
         var wasm = WasmTargetConfig{};
         errdefer wasm.deinit(allocator);
+        var elf = ElfTargetConfig{};
+        errdefer elf.deinit(allocator);
         var seen: std.EnumSet(TargetConfigField) = .empty;
 
         for (entries) |entry_idx| {
@@ -737,6 +765,19 @@ pub const TargetsConfig = struct {
                     output = OutputKind.fromTagName(ast.resolve(value.tag_literal)) orelse
                         return reject(diagnostic, .expected_output_kind, target, name, name_region);
                 },
+                .linker_script, .entry_point => {
+                    if (value != .string_literal) return reject(diagnostic, .expected_nonempty_string, target, name, name_region);
+                    const token = value.string_literal orelse return reject(diagnostic, .expected_nonempty_string, target, name, name_region);
+                    const text = ast.resolve(token);
+                    if (text.len == 0 or std.mem.findScalar(u8, text, 0) != null)
+                        return reject(diagnostic, .expected_nonempty_string, target, name, name_region);
+                    if (field == .linker_script) {
+                        try checkTargetPath(ast, token, .linker_script, diagnostic);
+                        elf.linker_script = try allocator.dupe(u8, text);
+                    } else {
+                        elf.entry_point = try allocator.dupe(u8, text);
+                    }
+                },
                 .exports => {
                     if (value != .list) return reject(diagnostic, .expected_export_names, target, name, name_region);
                     wasm.exports = try parseWasmExports(allocator, store, ast, value.list) orelse
@@ -758,10 +799,23 @@ pub const TargetsConfig = struct {
             }
         }
 
+        for (entries) |entry_idx| {
+            const entry = store.getTargetConfigEntry(entry_idx);
+            const name = ast.resolve(entry.name);
+            const field = TargetConfigField.fromName(name) orelse unreachable;
+            if (field == .linker_script or field == .entry_point) {
+                const elf_target = !target.isWindows() and target.toOsTag() != .macos and target.toCpuArch() != .wasm32;
+                if (!elf_target or output != .exe) {
+                    diagnostic.* = .{ .entry = .{ .problem = .elf_executable_only_field, .target = target, .field_name = name, .region = ast.tokens.resolve(entry.name) } };
+                    return error.InvalidTargetConfig;
+                }
+            }
+        }
+
         var has_wasm_config = false;
         var fields = seen.iterator();
         while (fields.next()) |field| has_wasm_config = has_wasm_config or field.wasmOnly();
-        return .{ .output = output, .wasm = if (has_wasm_config) wasm else null };
+        return .{ .output = output, .wasm = if (has_wasm_config) wasm else null, .elf = if (seen.contains(.linker_script) or seen.contains(.entry_point)) elf else null };
     }
 
     /// Store an unsigned wasm setting written as a literal that fits in `T`,
@@ -828,12 +882,14 @@ pub const TargetsConfig = struct {
 
             const parsed = try parseTargetConfig(allocator, store, ast, target, entry.config, &link_items, diagnostic);
             errdefer if (parsed.wasm) |wasm| wasm.deinit(allocator);
+            errdefer if (parsed.elf) |elf| elf.deinit(allocator);
 
             try specs.append(.{
                 .target = target,
                 .output = parsed.output,
                 .items = try link_items.toOwnedSlice(),
                 .wasm = parsed.wasm,
+                .elf = parsed.elf,
             });
         }
 
@@ -1594,4 +1650,69 @@ test "fromAST accepts nested relative target paths" {
     try testing.expectEqualStrings("./crt1.o", items[1].file_path);
     try testing.expectEqualStrings("..hidden/lib.a", items[2].file_path);
     try testing.expect(items[3] == .app);
+}
+
+test "fromAST captures ELF executable firmware settings" {
+    const allocator = testing.allocator;
+    const source =
+        \\platform ""
+        \\    requires { main : {} }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "roc_main": main_for_host }
+        \\    targets: {
+        \\        riscv64elf: {
+        \\            linker_script: "board/linker.ld",
+        \\            entry_point: "_start",
+        \\            inputs: ["startup.o", app, "libhost.a"],
+        \\            output: Exe,
+        \\        },
+        \\    }
+    ;
+    const source_copy = try allocator.dupe(u8, source);
+    defer allocator.free(source_copy);
+    var env = try base.CommonEnv.init(allocator, source_copy);
+    defer env.deinit(allocator);
+    const ast = try parse.file(allocator, &env);
+    defer ast.deinit();
+    try testing.expectEqual(@as(usize, 0), ast.parse_diagnostics.items.len);
+    var diagnostic: TargetsConfigDiagnostic = undefined;
+    const config = (try TargetsConfig.fromAST(allocator, ast, &diagnostic)).?;
+    defer config.deinit(allocator);
+    const elf = config.getLinkSpec(.riscv64elf).?.elf.?;
+    try testing.expectEqualStrings("board/linker.ld", elf.linker_script.?);
+    try testing.expectEqualStrings("_start", elf.entry_point.?);
+}
+
+test "fromAST rejects ELF settings on other output kinds and formats" {
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], entry_point: "_start", output: Archive },
+    , .elf_executable_only_field, .riscv64elf, "entry_point");
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], output: Shared, linker_script: "linker.ld" },
+    , .elf_executable_only_field, .riscv64elf, "linker_script");
+    try expectInvalidTargetEntry(
+        \\        wasm32: { inputs: [app], entry_point: "_start" },
+    , .elf_executable_only_field, .wasm32, "entry_point");
+    try expectInvalidTargetEntry(
+        \\        x64mac: { inputs: [app], linker_script: "linker.ld" },
+    , .elf_executable_only_field, .x64mac, "linker_script");
+}
+
+test "fromAST rejects malformed ELF settings and escaping scripts" {
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], entry_point: 42 },
+    , .expected_nonempty_string, .riscv64elf, "entry_point");
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], linker_script: "" },
+    , .expected_nonempty_string, .riscv64elf, "linker_script");
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], entry_point: "one", entry_point: "two" },
+    , .duplicate_field, .riscv64elf, "entry_point");
+    try expectInvalidTargetPath(
+        \\        riscv64elf: { inputs: [app], linker_script: "../outside.ld" },
+    , .linker_script, .parent_component, "../outside.ld");
+    try expectInvalidTargetPath(
+        \\        riscv64elf: { inputs: [app], linker_script: "/outside.ld" },
+    , .linker_script, .absolute, "/outside.ld");
 }

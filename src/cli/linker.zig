@@ -78,11 +78,12 @@ pub const TargetAbi = enum {
     gnu,
     msvc,
     mingw,
-    /// No C runtime, startup objects, or program interpreter.
+    /// No implicit C runtime, startup objects, or program interpreter.
     freestanding,
 
     /// Convert from RocTarget to TargetAbi
     pub fn fromRocTarget(target: RocTarget) TargetAbi {
+        if (target.toOsTag() == .freestanding) return .freestanding;
         if (target.windowsAbi()) |windows_abi| {
             return switch (windows_abi) {
                 .msvc => .msvc,
@@ -165,8 +166,15 @@ fn now(io: std.Io) i128 {
     return std.Io.Timestamp.now(io, .awake).nanoseconds;
 }
 
+/// Resolved, validated ELF firmware settings from the platform header.
+pub const ElfConfig = struct {
+    linker_script: ?[]const u8 = null,
+    entry_point: ?[]const u8 = null,
+};
+
 /// Configuration for the linker, specifying target format, ABI, paths, and linking options.
 pub const LinkConfig = struct {
+    elf: ?ElfConfig = null,
     timing: ?*Timing = null,
     immutable_objects: ?*@import("link_artifacts.zig").Objects = null,
     /// Target format to use for linking
@@ -833,95 +841,102 @@ fn buildLinkArgs(ctx: *CliCtx, config: LinkConfig) LinkError!std.array_list.Mana
             }
         },
         .freestanding => {
-            // WebAssembly linker (wasm-ld) for freestanding wasm32 target
-            try args.append("wasm-ld");
+            std.debug.assert(config.target_format == .elf or config.target_format == .wasm);
+            switch (config.target_format) {
+                .elf => try args.appendSlice(&.{ "ld.lld", "-o", config.output_path, "-nostdlib", "-static", "--gc-sections" }),
+                .coff, .macho => unreachable,
+                .wasm => {
+                    // WebAssembly linker (wasm-ld) for freestanding wasm32 target
+                    try args.append("wasm-ld");
 
-            // Add output argument
-            try args.append("-o");
-            try args.append(config.output_path);
+                    // Add output argument
+                    try args.append("-o");
+                    try args.append(config.output_path);
 
-            // Don't look for _start or _main entry point - we export specific functions
-            try args.append("--no-entry");
+                    // Don't look for _start or _main entry point - we export specific functions
+                    try args.append("--no-entry");
 
-            // Remove unused sections. The compiler passes explicit host-object
-            // exports below so they remain live roots.
-            try args.append("--gc-sections");
+                    // Remove unused sections. The compiler passes explicit host-object
+                    // exports below so they remain live roots.
+                    try args.append("--gc-sections");
 
-            // Preserve genuine undefined functions as host imports while
-            // retaining LLD's default errors for all other unresolved symbols.
-            // In particular, --allow-undefined also implies
-            // --unresolved-symbols=ignore-all, which would silently discard a
-            // platform header's --export when no definition has that name.
-            try args.append("--import-undefined");
+                    // Preserve genuine undefined functions as host imports while
+                    // retaining LLD's default errors for all other unresolved symbols.
+                    // In particular, --allow-undefined also implies
+                    // --unresolved-symbols=ignore-all, which would silently discard a
+                    // platform header's --export when no definition has that name.
+                    try args.append("--import-undefined");
 
-            // A non-debug final module exposes only its Import and Export
-            // sections. Compiler-owned local names have no runtime purpose and
-            // must not make implementation details observable in name/linking
-            // metadata (also keeps output independent of its filename).
-            if (!config.wasm_debug_info) {
-                try args.append("--strip-all");
-            }
-
-            if (config.wasm_import_memory) {
-                try args.append("--import-memory");
-            }
-
-            // Set initial memory size when one was configured. Must be a
-            // multiple of 64KB (WASM page size). Without the flag wasm-ld
-            // sizes memory itself from the data segments plus the stack.
-            if (config.wasm_initial_memory) |initial_memory| {
-                const initial_memory_str = std.fmt.allocPrint(ctx.arena, "--initial-memory={d}", .{initial_memory}) catch return LinkError.OutOfMemory;
-                try args.append(initial_memory_str);
-            }
-
-            switch (wasmStackLayout(config.wasm_global_base)) {
-                // The stack occupies the lowest addresses and grows down
-                // toward 0, with static data and the heap above it. An
-                // overflow wraps the stack pointer below 0 and the first write
-                // traps out of bounds, so detecting it costs nothing at
-                // runtime. The cap on maximum memory keeps the addresses a
-                // wrapped stack pointer reaches outside memory.
-                .stack_first => {
-                    try args.append("--stack-first");
-                    const maximum_memory = config.wasm_maximum_memory orelse stackFirstMaximumMemory(config.wasm_stack_size);
-                    if (maximum_memory > stackFirstMaximumMemory(config.wasm_stack_size)) {
-                        base.invariant("wasm link invariant violated: maximum memory {d} lets a wrapped stack pointer address memory", .{maximum_memory});
+                    // A non-debug final module exposes only its Import and Export
+                    // sections. Compiler-owned local names have no runtime purpose and
+                    // must not make implementation details observable in name/linking
+                    // metadata (also keeps output independent of its filename).
+                    if (!config.wasm_debug_info) {
+                        try args.append("--strip-all");
                     }
-                    const maximum_memory_str = std.fmt.allocPrint(ctx.arena, "--max-memory={d}", .{maximum_memory}) catch return LinkError.OutOfMemory;
-                    try args.append(maximum_memory_str);
-                },
-                // The host owns every address below the global base, so
-                // static data starts there and the stack sits above it.
-                // Generated code checks the stack bounds wherever the stack
-                // can grow without limit.
-                .data_first => |global_base| {
-                    try args.append("--no-stack-first");
-                    const global_base_str = std.fmt.allocPrint(ctx.arena, "--global-base={d}", .{global_base}) catch return LinkError.OutOfMemory;
-                    try args.append(global_base_str);
-                    if (config.wasm_maximum_memory) |maximum_memory| {
-                        const maximum_memory_str = std.fmt.allocPrint(ctx.arena, "--max-memory={d}", .{maximum_memory}) catch return LinkError.OutOfMemory;
-                        try args.append(maximum_memory_str);
+
+                    if (config.wasm_import_memory) {
+                        try args.append("--import-memory");
+                    }
+
+                    // Set initial memory size when one was configured. Must be a
+                    // multiple of 64KB (WASM page size). Without the flag wasm-ld
+                    // sizes memory itself from the data segments plus the stack.
+                    if (config.wasm_initial_memory) |initial_memory| {
+                        const initial_memory_str = std.fmt.allocPrint(ctx.arena, "--initial-memory={d}", .{initial_memory}) catch return LinkError.OutOfMemory;
+                        try args.append(initial_memory_str);
+                    }
+
+                    switch (wasmStackLayout(config.wasm_global_base)) {
+                        // The stack occupies the lowest addresses and grows down
+                        // toward 0, with static data and the heap above it. An
+                        // overflow wraps the stack pointer below 0 and the first write
+                        // traps out of bounds, so detecting it costs nothing at
+                        // runtime. The cap on maximum memory keeps the addresses a
+                        // wrapped stack pointer reaches outside memory.
+                        .stack_first => {
+                            try args.append("--stack-first");
+                            const maximum_memory = config.wasm_maximum_memory orelse stackFirstMaximumMemory(config.wasm_stack_size);
+                            if (maximum_memory > stackFirstMaximumMemory(config.wasm_stack_size)) {
+                                base.invariant("wasm link invariant violated: maximum memory {d} lets a wrapped stack pointer address memory", .{maximum_memory});
+                            }
+                            const maximum_memory_str = std.fmt.allocPrint(ctx.arena, "--max-memory={d}", .{maximum_memory}) catch return LinkError.OutOfMemory;
+                            try args.append(maximum_memory_str);
+                        },
+                        // The host owns every address below the global base, so
+                        // static data starts there and the stack sits above it.
+                        // Generated code checks the stack bounds wherever the stack
+                        // can grow without limit.
+                        .data_first => |global_base| {
+                            try args.append("--no-stack-first");
+                            const global_base_str = std.fmt.allocPrint(ctx.arena, "--global-base={d}", .{global_base}) catch return LinkError.OutOfMemory;
+                            try args.append(global_base_str);
+                            if (config.wasm_maximum_memory) |maximum_memory| {
+                                const maximum_memory_str = std.fmt.allocPrint(ctx.arena, "--max-memory={d}", .{maximum_memory}) catch return LinkError.OutOfMemory;
+                                try args.append(maximum_memory_str);
+                            }
+                        },
+                    }
+
+                    // Hosts read the stack bounds and the stack pointer after a trap
+                    // to tell a stack overflow from any other trap, and reset the
+                    // stack pointer before calling in again.
+                    for (wasmStackExports(config.wasm_cpu_level)) |export_name| {
+                        const export_arg = std.fmt.allocPrint(ctx.arena, "--export={s}", .{export_name}) catch return LinkError.OutOfMemory;
+                        try args.append(export_arg);
+                    }
+
+                    // Set stack size (configurable, default 8MB)
+                    // Must be a multiple of 16 (stack alignment)
+                    const stack_size_str = std.fmt.allocPrint(ctx.arena, "stack-size={d}", .{config.wasm_stack_size}) catch return LinkError.OutOfMemory;
+                    try args.append("-z");
+                    try args.append(stack_size_str);
+
+                    for (config.wasm_exports) |export_name| {
+                        const export_arg = std.fmt.allocPrint(ctx.arena, "--export={s}", .{export_name}) catch return LinkError.OutOfMemory;
+                        try args.append(export_arg);
                     }
                 },
-            }
-
-            // Hosts read the stack bounds and the stack pointer after a trap
-            // to tell a stack overflow from any other trap, and reset the
-            // stack pointer before calling in again.
-            for (wasmStackExports(config.wasm_cpu_level)) |export_name| {
-                const export_arg = std.fmt.allocPrint(ctx.arena, "--export={s}", .{export_name}) catch return LinkError.OutOfMemory;
-                try args.append(export_arg);
-            }
-
-            // Set stack size (configurable, default 8MB)
-            // Must be a multiple of 16 (stack alignment)
-            const stack_size_str = std.fmt.allocPrint(ctx.arena, "stack-size={d}", .{config.wasm_stack_size}) catch return LinkError.OutOfMemory;
-            try args.append("-z");
-            try args.append(stack_size_str);
-
-            for (config.wasm_exports) |export_name| {
-                const export_arg = std.fmt.allocPrint(ctx.arena, "--export={s}", .{export_name}) catch return LinkError.OutOfMemory;
-                try args.append(export_arg);
             }
         },
         .other,
@@ -991,6 +1006,15 @@ fn buildLinkArgs(ctx: *CliCtx, config: LinkConfig) LinkError!std.array_list.Mana
 
     // Force-include and export the host's declared exports from a shared
     // library. (wasm shared output uses --export via config.wasm_exports.)
+    if (config.elf) |elf| {
+        std.debug.assert(config.target_format == .elf and config.output_kind == .exe);
+        if (elf.linker_script) |path| {
+            try args.append("--script");
+            try args.append(path);
+        }
+        if (elf.entry_point) |name| try args.append(try std.fmt.allocPrint(ctx.arena, "--entry={s}", .{name}));
+    }
+
     try appendSharedLibraryExports(ctx, &args, target_os, config.target_format, config.output_kind, config.export_symbols);
 
     // For WASM targets, wrap platform files in --whole-archive to include all symbols
@@ -1919,4 +1943,40 @@ test "link error when LLVM not available" {
         const result = link(&ctx, config);
         try std.testing.expectError(LinkError.LLVMNotAvailable, result);
     }
+}
+
+test "freestanding ELF firmware uses its declared script and entry without a runtime interpreter" {
+    var arena_instance = collections.SingleThreadArena.init(std.testing.allocator);
+    defer arena_instance.deinit();
+    var io = Io.create(std.testing.io);
+    var ctx = CliCtx.init(std.testing.allocator, arena_instance.allocator(), &io, .build);
+    ctx.initIo();
+    defer ctx.deinit();
+    const config = LinkConfig{
+        .target_format = .elf,
+        .target_abi = .freestanding,
+        .target_os = .freestanding,
+        .target_arch = .riscv64,
+        .output_path = "app.elf",
+        .object_files = &.{"app.o"},
+        .elf = .{ .linker_script = "platform/targets/riscv64elf/linker.ld", .entry_point = "_start" },
+    };
+    const args = try buildLinkArgs(&ctx, config);
+    try std.testing.expectEqualStrings("ld.lld", args.items[0]);
+    try std.testing.expect(findArg(args.items, "-dynamic-linker") == null);
+    var saw_script = false;
+    var saw_entry = false;
+    for (args.items, 0..) |arg, i| {
+        if (std.mem.eql(u8, arg, "--script")) {
+            try std.testing.expectEqualStrings(config.elf.?.linker_script.?, args.items[i + 1]);
+            saw_script = true;
+        }
+        if (std.mem.eql(u8, arg, "--entry=_start")) saw_entry = true;
+        try std.testing.expect(!std.mem.eql(u8, arg, "--no-entry"));
+        try std.testing.expect(!std.mem.eql(u8, arg, "--import-undefined"));
+    }
+    try std.testing.expect(saw_script and saw_entry);
+    try std.testing.expectEqual(TargetAbi.freestanding, TargetAbi.fromRocTarget(.riscv64elf));
+    try std.testing.expectEqual(TargetFormat.elf, TargetFormat.detectFromTarget(.riscv64, .freestanding));
+    try std.testing.expectEqual(TargetFormat.wasm, TargetFormat.detectFromTarget(.wasm32, .freestanding));
 }
