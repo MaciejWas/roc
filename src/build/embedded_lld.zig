@@ -16,14 +16,22 @@ pub const Format = enum {
     wasm,
 
     pub fn detectFromSystem() Format {
-        return detectFromOs(builtin.target.os.tag);
+        return detectFromTarget(builtin.target.cpu.arch, builtin.target.os.tag);
     }
 
-    pub fn detectFromOs(os: std.Target.Os.Tag) Format {
+    /// An OS alone cannot distinguish native freestanding firmware from Wasm.
+    pub fn detectFromTarget(arch: std.Target.Cpu.Arch, os: std.Target.Os.Tag) Format {
+        if (arch.isWasm()) return .wasm;
+        if (os == .freestanding) return .elf;
+        return detectFromOs(os);
+    }
+
+    fn detectFromOs(os: std.Target.Os.Tag) Format {
+        std.debug.assert(os != .freestanding);
         return switch (os) {
             .windows => .coff,
             .macos, .ios, .watchos, .tvos => .macho,
-            .freestanding => .wasm,
+            .freestanding => unreachable, // architecture-aware selection handled this already
             .linux,
             .other,
             .contiki,

@@ -1,57 +1,58 @@
-# Roc + Zig + FreeRTOS on QEMU RISC-V
+# Hello World on FreeRTOS
 
-A minimal working example: a FreeRTOS task invokes Roc, Roc writes
-`Hello world` to the emulated UART, and the task cleans up and deletes itself.
-The idle hook then exits QEMU successfully.
+The application is [app/main.roc](app/main.roc). It selects the platform in one
+line and uses its UART effect:
 
-From the repository root, using the same Zig version as the compiler:
+```roc
+app [main!] { pf: platform "../platform/main.roc" }
 
-```sh
-zig build roc
-zig build --build-file examples/qemu-freertos/build.zig run
+import pf.Uart
+
+main! = || {
+    Uart.write!("Hello world\n")
+}
 ```
 
-The first build downloads the pinned FreeRTOS Kernel V11.2.0 release source.
-`qemu-system-riscv64` must be on PATH. To build firmware without running it,
-omit `run`; the firmware artifact is named `hello.elf`.
+The [platform](platform/README.md) owns FreeRTOS, the Zig host, UART registers,
+allocation, locking, startup, and the memory layout. The app needs no Zig build
+file. Build the repository's compiler first with `zig build roc`.
 
-Expected output:
+## 1. Build the platform once
+
+```sh
+(cd examples/qemu-freertos/platform && zig build --prefix .)
+```
+
+This downloads the pinned FreeRTOS source and installs the reusable archive,
+startup object, and linker script under `platform/targets/riscv64elf/`.
+Repeat only when changing the platform. It does not build an app.
+
+## 2. Build the app with Roc
+
+```sh
+zig-out/bin/roc build examples/qemu-freertos/app/main.roc --output=examples/qemu-freertos/app/hello.elf
+```
+
+Roc selects the platform's freestanding target and links the app with the
+prebuilt artifacts to produce the final firmware ELF. This command does not
+invoke Zig or rebuild FreeRTOS. Repeat it whenever the app changes.
+
+## 3. Run the firmware
+
+```sh
+examples/qemu-freertos/platform/run.sh examples/qemu-freertos/app/hello.elf
+```
+
+With `qemu-system-riscv64` on PATH, the minimal app shown above prints:
 
 ```text
 Hello world
 ```
 
-The command exits with status zero. QEMU shutdown is part of this example's
-test harness; on hardware the task would exit and FreeRTOS would keep running.
+The task returns from Roc, cleans up, and deletes itself. The example harness
+then exits QEMU with status zero. QEMU loads the ELF directly: there is no
+separate FreeRTOS image to construct. A physical board could supply its own
+packaging/flashing script at this step.
 
-The sequence is:
-
-1. Machine-mode startup initializes RAM and the stack on QEMU's `virt` board.
-2. The Zig host creates a FreeRTOS recursive mutex and one Roc task.
-3. The Roc app calls `Uart.write!("Hello world\n")` through the platform.
-4. Zig writes the borrowed string to the emulated 16550 UART.
-5. The task cleans up its Roc runtime state and deletes itself.
-6. The idle hook tells QEMU's test device to exit successfully.
-
-The scheduler uses the standard RISC-V port and the QEMU machine timer.
-`-bios none` starts the firmware directly, without Linux or OpenSBI.
-The Zig/FreeRTOS firmware uses RV64IMA plus CSR instructions for privileged
-scheduler code. The Roc archive retains its RV64IA baseline; everything uses
-the LP64 ABI. The platform deliberately requires hardware multiplication and
-division (`M`). The FreeRTOS kernel remains upstream C; the platform is
-Zig, with a small C bridge for FreeRTOS macros. Zig supplies compiler runtime
-helpers. Standard C declarations come from Zig's LP64 musl headers; no libc
-library is linked.
-
-Files:
-
-- `main.roc`: the application.
-- `platform/`: Roc's platform declaration and hosted UART effect.
-- `host.zig`: UART, allocator, task-local state, recursive mutex callbacks,
-  cooperative task shutdown, and QEMU exit handling.
-- `freertos_bridge.c`: wrappers for the FreeRTOS macro API.
-- `FreeRTOSConfig.h`: scheduler, heap, timer, and task-local storage settings.
-- `startup.S` and `linker.ld`: boot code and the `virt` memory layout.
-
-The example deliberately uses one task and one hart. It does not test
-concurrent tasks, nested entry, task recreation, or boxy execution yet.
+All commands above run from the repository root using its Zig version. See
+the [platform README](platform/README.md) for CPU and implementation details.

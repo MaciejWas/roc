@@ -8,8 +8,10 @@ platform ""
 	hosted { "roc_uart_write": Uart.write! }
 	targets: {
 		riscv64elf: {
-			inputs: [app],
-			output: Archive,
+			inputs: ["startup.o", app, "libhost.a"],
+			output: Exe,
+			linker_script: "linker.ld",
+			entry_point: "_start",
 		},
 	}
 

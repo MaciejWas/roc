@@ -3371,7 +3371,7 @@ fn rocRunDefaultAppSharedMemoryShim(ctx: *CliCtx, args: cli_args.RunArgs, staged
         try object_files.appendSlice(ctx.arena, &.{ platform_shim_path, shim_path, runtime_path, compiler_rt_path });
         if (boxy_runtime) try object_files.append(ctx.arena, try writeBoxyRuntimeObject(ctx, temp_dir, selected_target));
         const link_config = linker.LinkConfig{
-            .target_format = linker.TargetFormat.detectFromOs(selected_target.toOsTag()),
+            .target_format = linker.TargetFormat.detectFromTarget(selected_target.toCpuArch(), selected_target.toOsTag()),
             .target_abi = buildLinkAbi(selected_target, true),
             .target_os = selected_target.toOsTag(),
             .target_arch = selected_target.toCpuArch(),
@@ -8430,6 +8430,7 @@ const PlatformLinkInputs = struct {
     platform_files_pre: []const []const u8,
     platform_files_post: []const []const u8,
     wasm: ?roc_target.WasmTargetConfig,
+    elf: ?linker.ElfConfig = null,
 };
 
 fn selectBuildPlatformTarget(
@@ -8915,7 +8916,26 @@ fn collectPlatformLinkInputs(
         }
     }
 
+    var elf: ?linker.ElfConfig = null;
+    if (link_spec.elf) |settings| {
+        const script = if (settings.linker_script) |path|
+            try std.fs.path.join(ctx.arena, &.{ platform_dir, files_dir, target_name, path })
+        else
+            null;
+        if (script) |path| std.Io.Dir.cwd().access(ctx.io.std_io, path, .{}) catch {
+            renderValidationError(ctx, .{ .missing_target_file = .{
+                .target = target,
+                .output = link_type,
+                .file_path = settings.linker_script.?,
+                .expected_full_path = path,
+            } });
+            return error.MissingTargetFile;
+        };
+        elf = .{ .linker_script = script, .entry_point = settings.entry_point };
+    }
+
     return .{
+        .elf = elf,
         .target_name = target_name,
         .platform_files_dir = try std.fs.path.join(ctx.arena, &.{ platform_dir, files_dir }),
         .platform_files_pre = platform_files_pre.items,
@@ -11126,7 +11146,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
                 static_data_exports,
                 enable_default_platform_runtime and args.debug,
             );
-            const target_format = linker.TargetFormat.detectFromOs(target_os);
+            const target_format = linker.TargetFormat.detectFromTarget(target_arch, target_os);
             // The app references hosted functions weakly (see declareHostSymbol),
             // and a weak reference alone never extracts an archive member. Worse,
             // LLD's COFF symbol table discards a lazy archive entry when a weak
@@ -11153,6 +11173,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
                 // by symbol reference and unused host code can be stripped.
                 .lazy_platform_archives = true,
                 .object_files = object_files.items,
+                .elf = link_inputs.elf,
                 .platform_files_pre = link_inputs.platform_files_pre,
                 .platform_files_post = link_inputs.platform_files_post,
                 .extra_args = &.{},
@@ -12423,7 +12444,7 @@ fn linkNativeBuild(
         const link_config = linker.LinkConfig{
             .timing = &timing,
             .immutable_objects = objects,
-            .target_format = linker.TargetFormat.detectFromOs(target_os),
+            .target_format = linker.TargetFormat.detectFromTarget(target_arch, target_os),
             .target_abi = buildLinkAbi(target, args.synthetic_default_platform),
             .target_os = target_os,
             .target_arch = target_arch,
@@ -12433,6 +12454,7 @@ fn linkNativeBuild(
             // symbol reference and unused host code can be stripped.
             .lazy_platform_archives = true,
             .object_files = object_files.items,
+            .elf = link_inputs.elf,
             .platform_files_pre = link_inputs.platform_files_pre,
             .platform_files_post = link_inputs.platform_files_post,
             .extra_args = &.{},
@@ -12633,13 +12655,14 @@ fn rocBuildEmbedded(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildRe
         try writeArchiveOutput(ctx, target, final_output_path, link_inputs, object_files.items);
     } else {
         const link_config = linker.LinkConfig{
-            .target_format = linker.TargetFormat.detectFromOs(target_os),
+            .target_format = linker.TargetFormat.detectFromTarget(target_arch, target_os),
             .target_abi = buildLinkAbi(target, args.synthetic_default_platform),
             .target_os = target_os,
             .target_arch = target_arch,
             .output_path = final_output_path,
             .output_kind = linkerOutputKind(link_type),
             .object_files = object_files.items,
+            .elf = link_inputs.elf,
             .platform_files_pre = link_inputs.platform_files_pre,
             .platform_files_post = link_inputs.platform_files_post,
             .extra_args = &.{},

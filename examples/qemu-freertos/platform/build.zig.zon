@@ -6,8 +6,8 @@
         .freertos = .{
             // FreeRTOS Kernel V11.2.0, pinned to the release commit.
             .url = "https://codeload.github.com/FreeRTOS/FreeRTOS-Kernel/tar.gz/0adc196d4bd52a2d91102b525b0aafc1e14a2386",
-            .hash = "N-V-__8AANb2-ACVAk18jm5Av8-68CUU5DxcZt-acisnKka5",
+            .hash = "N-V-__8AANb2-ABQF22jcaKtwvDYif0JuTyWgUvqJSqd5j6g",
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "platform", "FreeRTOSConfig.h", "freertos_bridge.c", "startup.S", "linker.ld", "host.zig", "main.roc", "README.md" },
+    .paths = .{ "build.zig", "build.zig.zon", "main.roc", "Uart.roc", "host.zig", "freertos_bridge.c", "FreeRTOSConfig.h", "startup.S", "linker.ld", "run.sh", "README.md" },
 }
