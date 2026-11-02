@@ -36,6 +36,12 @@ pub const runtime_symbols: [shim_symbols.runtime_set.len][]const u8 = blk: {
 };
 
 /// Outcome of scanning the host inputs for a set of needed symbols.
+const freestanding_runtime_symbols = runtime_symbols ++ [_][]const u8{ shim_symbols.roc_get_task_state, shim_symbols.roc_set_task_state, shim_symbols.roc_acquire_runtime_lock, shim_symbols.roc_release_runtime_lock };
+
+pub fn runtimeSymbols(arch: std.Target.Cpu.Arch, os: std.Target.Os.Tag) []const []const u8 {
+    return if (os == .freestanding and !arch.isWasm()) &freestanding_runtime_symbols else &runtime_symbols;
+}
+
 pub const ScanResult = struct {
     /// Needed symbols no scanned input defines. Slices alias the caller's
     /// `needed` strings.
@@ -1134,4 +1140,16 @@ test "open inspection handles detect atomic replacement and survive mid-read tru
     try std.testing.expect(input.read(64, 64) == null);
     try std.testing.expect(source.failed);
     try std.testing.expect(!sameFileState(before, try file.stat(io)));
+}
+
+test "native freestanding platforms require task-state callbacks" {
+    const native = runtimeSymbols(.riscv64, .freestanding);
+    try std.testing.expectEqual(runtime_symbols.len + 4, native.len);
+    try std.testing.expectEqualStrings(shim_symbols.roc_get_task_state, native[runtime_symbols.len]);
+    try std.testing.expectEqualStrings(shim_symbols.roc_set_task_state, native[runtime_symbols.len + 1]);
+    try std.testing.expectEqualStrings(shim_symbols.roc_acquire_runtime_lock, native[runtime_symbols.len + 2]);
+    try std.testing.expectEqualStrings(shim_symbols.roc_release_runtime_lock, native[runtime_symbols.len + 3]);
+    try std.testing.expectEqual(runtime_symbols.len, runtimeSymbols(.wasm32, .freestanding).len);
+    try std.testing.expectEqual(runtime_symbols.len, runtimeSymbols(.aarch64, .linux).len);
+    try std.testing.expectEqual(runtime_symbols.len, runtimeSymbols(.x86_64, .windows).len);
 }

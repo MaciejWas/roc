@@ -2582,7 +2582,7 @@ const RunShimHost = struct {
             ctx,
             host_input_paths.items,
             referenced_hosted_symbols,
-            target_name,
+            selected_target,
             false,
         );
 
@@ -8625,7 +8625,7 @@ fn verifyHostInputSymbols(
     ctx: *CliCtx,
     host_input_paths: []const []const u8,
     hosted_symbols: []const []const u8,
-    target_name: []const u8,
+    target: RocTarget,
     synthetic_default_platform: bool,
 ) CliMainError!void {
     if (host_input_paths.len == 0 and synthetic_default_platform) {
@@ -8633,14 +8633,14 @@ fn verifyHostInputSymbols(
     }
 
     var needed = std.ArrayList([]const u8).empty;
-    try needed.appendSlice(ctx.arena, &host_symbols.runtime_symbols);
+    try needed.appendSlice(ctx.arena, host_symbols.runtimeSymbols(target.toCpuArch(), target.toOsTag()));
     try needed.appendSlice(ctx.arena, hosted_symbols);
 
     const result = try host_symbols.scanHostInputs(ctx.arena, ctx.io.std_io, host_input_paths, needed.items);
     if (result.all_inputs_scanned and result.missing.len > 0) {
         return ctx.fail(.{ .missing_host_symbols = .{
             .symbols = result.missing,
-            .target = target_name,
+            .target = target.toName(),
         } });
     }
 }
@@ -11113,7 +11113,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
                 ctx,
                 try hostInputPaths(ctx, link_inputs),
                 hosted_symbols,
-                link_inputs.target_name,
+                target,
                 args.synthetic_default_platform,
             );
 
@@ -12397,7 +12397,7 @@ fn linkNativeBuild(
         const inspection_started = std.Io.Timestamp.now(ctx.io.std_io, .awake);
         var needed: std.ArrayList([]const u8) = .empty;
         if (!(host_paths.len == 0 and args.synthetic_default_platform)) {
-            try needed.appendSlice(ctx.arena, &host_symbols.runtime_symbols);
+            try needed.appendSlice(ctx.arena, host_symbols.runtimeSymbols(target.toCpuArch(), target.toOsTag()));
             try needed.appendSlice(ctx.arena, facts.hosted_symbols);
         }
         const inspected = try host_symbols.inspect(ctx.arena, ctx.io.std_io, host_paths, needed.items, link_type == .shared);

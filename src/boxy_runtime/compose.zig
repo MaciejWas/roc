@@ -358,6 +358,9 @@ const PlatformImmortals = struct {
     }
 
     fn alloc(ops: *RocOps, size: usize, alignment: usize) [*]u8 {
+        // Freestanding platforms own allocation and have no OS page mapper.
+        // These descriptors retain their storage for the runtime lifetime.
+        if (comptime builtin.os.tag == .freestanding and !builtin.cpu.arch.isWasm()) return @ptrCast(ops.allocRaw(size, alignment));
         while (!lock.tryLock()) std.atomic.spinLoopHint();
         defer lock.unlock();
         var start = std.mem.alignForward(usize, next, alignment);
