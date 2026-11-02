@@ -24336,7 +24336,7 @@ host feature detection. Its CPU contract requires atomic instructions (`A`) and 
 ISA extensions. Target registration does not imply code-generation support:
 LP64 layout classification consumes committed layouts and uses the standard
 integer calling convention, including integer-chunk transport for floats and
-fixed-length vectors. The staged LP64 LLVM call plan reuses AArch64's exact-byte
+fixed-length vectors. The LP64 LLVM call plan reuses AArch64's exact-byte
 piece packing and array carriers. A register piece records an explicit LLVM
 floating-point carrier when LP64 transports a scalar float in integer registers;
 consumers bitcast its bits rather than converting its numeric value. Named
@@ -24352,8 +24352,25 @@ and whole arguments that exceed that budget use the existing caller-owned group
 storage; the storage pointer is reserved before assigning direct slots. Members
 copy stored arguments on entry before that storage is reused. Argument and return
 adapters preserve the external LP64 ABI. Self-tail loops and other targets keep
-their existing conventions. Runtime integration remains unfinished and must not
-borrow another target's artifacts.
+their existing conventions. The compiler bundles RV64IA builtins (including
+compiler-rt) and standalone boxy runtime objects with their own content digests.
+The normal LLVM build selects dedicated full/core RV64IA symbol-ABI builtin
+bitcode so Zig resolves task-local state for the native target, rather than
+reusing Wasm's global state. The platform-facing `roc_cleanup_task_state`
+export remains external through builtin pruning and final optimization even
+when no Roc procedure calls it; both full and core payloads define it. Only
+the final platform app object exports runtime entry points; cached procedure
+packs retain their used builtins privately. LLVM RISC-V output uses the standard
+medium-any (`medany`) code model, addressing code and data within one 2 GiB
+window without restricting firmware to the low-address `medlow` range.
+Target metadata owns the runtime ABI, native builtin payload selection, LLVM
+availability, and code model. Build-time embedding, host-symbol validation, and
+code generation consume those declarations rather than maintaining their own
+architecture lists. Task-state components are indexed by an enum and each
+owner supplies its cleanup routine.
+RISC-V has no bundled default platform; a FreeRTOS platform supplies the host
+callbacks and startup. Runtime integration must not borrow another target's
+artifacts.
 
 On native freestanding targets, the standalone boxy runtime allocates its own
 bookkeeping through the platform's existing allocation symbols, just like Roc
@@ -24394,8 +24411,7 @@ Shutdown is cooperative: the task returns from every Roc invocation, releases
 its owned Roc values, and calls the runtime's C-convention
 `roc_cleanup_task_state() -> void` before deletion. Each component validates its
 inactive-state invariants and releases its buffers; cleanup acquires the same
-recursive mutex, frees the task root
-and clears the platform slot. Cleanup on an empty slot does nothing. New tasks
+recursive mutex, frees the task root, and clears the platform slot. Cleanup on an empty slot does nothing. New tasks
 start with null state even when task handles are reused. Deletion during Roc
 execution and interrupt re-entry are unsupported. Shared runtime data is not
 freed by per-task cleanup. Hosted and Wasm targets retain their existing

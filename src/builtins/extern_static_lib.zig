@@ -22,6 +22,5 @@ comptime {
 }
 
 comptime {
-    if (@import("execution_context.zig").native_freestanding)
-        @export(&@import("execution_context.zig").cleanupTaskState, .{ .name = @import("shim_symbols.zig").roc_cleanup_task_state });
+    @import("execution_context.zig").exportTaskCleanup();
 }

@@ -2993,6 +2993,20 @@ pub fn build(b: *std.Build) void {
         private_runtime_entries.print(b.allocator, "    .{{ .target = .{s}, .bitcode = @embedFile(\"{s}\") }},\n", .{ @tagName(runtime_target), file_name }) catch @panic("OOM");
     }
 
+    // Like private runtimes, native builtin payloads are declared by target
+    // metadata. Zig resolves their platform state choices before LLVM links them.
+    var builtin_runtime_entries: std.ArrayList(u8) = .empty;
+    for (std.enums.values(roc_target.RocTarget)) |runtime_target| {
+        if (runtime_target.llvmBuiltinRuntimeTarget() != runtime_target) continue;
+        const resolved = b.resolveTargetQuery(runtime_target.llvmTargetQuery());
+        const name = @tagName(runtime_target);
+        const full_name = b.fmt("builtins_{s}_extern.bc", .{name});
+        const core_name = b.fmt("builtins_{s}_core_extern.bc", .{name});
+        _ = llvm_embedded_files.addCopyFile(addBuiltinsBitcode(b, roc_modules, b.fmt("_{s}_extern_bc", .{name}), "src/builtins/extern_static_lib.zig", resolved, false), full_name);
+        _ = llvm_embedded_files.addCopyFile(addBuiltinsBitcode(b, roc_modules, b.fmt("_{s}_core_extern_bc", .{name}), "src/builtins/extern_static_lib_core.zig", resolved, false), core_name);
+        builtin_runtime_entries.print(b.allocator, "    .{{ .target = .{s}, .full = @embedFile(\"{s}\"), .core = @embedFile(\"{s}\") }},\n", .{ name, full_name, core_name }) catch @panic("OOM");
+    }
+
     const llvm_embedded_fixed_source: []const u8 =
         \\pub const builtins32_bc = @embedFile("builtins32.bc");
         \\pub const builtins64_bc = @embedFile("builtins64.bc");
@@ -3012,7 +3026,10 @@ pub fn build(b: *std.Build) void {
         \\pub const private_runtimes = [_]PrivateRuntime{
         \\
     ;
-    const llvm_embedded_source = b.fmt("{s}{s}}};\n", .{ llvm_embedded_fixed_source, private_runtime_entries.items });
+    const llvm_embedded_source = b.fmt(
+        "{s}{s}}};\npub const BuiltinRuntime = struct {{ target: @import(\"roc_target\").RocTarget, full: []const u8, core: []const u8 }};\npub const builtin_runtimes = [_]BuiltinRuntime{{\n{s}}};\n",
+        .{ llvm_embedded_fixed_source, private_runtime_entries.items, builtin_runtime_entries.items },
+    );
 
     const llvm_embedded_module = b.createModule(.{
         .root_source_file = llvm_embedded_files.add("llvm_embedded.zig", llvm_embedded_source),
@@ -5747,13 +5764,13 @@ fn addBoxyRuntimeObject(
 fn addBuiltinsBitcode(
     b: *std.Build,
     roc_modules: modules.RocModules,
-    comptime suffix: []const u8,
+    suffix: []const u8,
     root_source_file: []const u8,
     target: ResolvedTarget,
     link_libc: ?bool,
 ) std.Build.LazyPath {
     const obj = b.addObject(.{
-        .name = "roc_builtins" ++ suffix,
+        .name = b.fmt("roc_builtins{s}", .{suffix}),
         .root_module = b.createModule(.{
             .root_source_file = b.path(root_source_file),
             .target = target,
@@ -6169,6 +6186,7 @@ fn addMainExe(
         // WebAssembly 1.0: a wasm32v1 program links objects that use no
         // instruction-set extension.
         .{ .name = "wasm32v1", .query = roc_target.RocTarget.wasm32v1.llvmTargetQuery() },
+        .{ .name = "riscv64elf", .query = roc_target.RocTarget.riscv64elf.llvmTargetQuery() },
         .{ .name = "x64win", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc } },
         .{ .name = "x64mingw", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },
         .{ .name = "arm64win", .query = .{ .cpu_arch = .aarch64, .os_tag = .windows, .abi = .msvc } },
@@ -6305,7 +6323,7 @@ fn addMainExe(
             );
         }
 
-        if (!cross_is_wasm) {
+        if (!cross_is_wasm and cross_target.query.os_tag != .freestanding) {
             const default_platform_os = cross_target.query.os_tag orelse .freestanding;
             const default_platform_root_source = if (default_platform_os == .linux)
                 b.path("src/default_platform/linux_runtime.zig")

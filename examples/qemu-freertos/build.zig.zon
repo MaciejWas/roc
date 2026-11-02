@@ -1,0 +1,13 @@
+.{
+    .name = .roc_qemu_freertos,
+    .version = "0.0.0",
+    .fingerprint = 0xc07741878ad0b337,
+    .dependencies = .{
+        .freertos = .{
+            // FreeRTOS Kernel V11.2.0, pinned to the release commit.
+            .url = "https://codeload.github.com/FreeRTOS/FreeRTOS-Kernel/tar.gz/0adc196d4bd52a2d91102b525b0aafc1e14a2386",
+            .hash = "N-V-__8AANb2-ACVAk18jm5Av8-68CUU5DxcZt-acisnKka5",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "platform", "FreeRTOSConfig.h", "freertos_bridge.c", "startup.S", "linker.ld", "host.zig", "main.roc", "README.md" },
+}
