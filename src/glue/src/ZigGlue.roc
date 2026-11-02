@@ -611,7 +611,7 @@ generate_roc_list_generic =
 	\\            const data_addr = @intFromPtr(alloc_ptr);
 	\\            const rc: *isize = @ptrFromInt(data_addr - @sizeOf(isize));
 	\\            if (rc.* == 0) return; // REFCOUNT_STATIC_DATA—bytes are in read-only memory
-	\\            const prev = @atomicRmw(isize, rc, .Sub, 1, .monotonic);
+	\\            const prev = rocRefcountSub(rc);
 	\\            if (prev == 1) {
 	\\                const base: *anyopaque = @ptrFromInt(data_addr - header_bytes);
 	\\                roc_host.roc_dealloc(roc_host, base, alloc_align);
@@ -634,7 +634,7 @@ generate_roc_list_generic =
 	\\            const data_addr = @intFromPtr(alloc_ptr);
 	\\            const rc: *isize = @ptrFromInt(data_addr - @sizeOf(isize));
 	\\            if (rc.* == 0) return; // REFCOUNT_STATIC_DATA—elements are in read-only memory
-	\\            const prev = @atomicRmw(isize, rc, .Sub, 1, .acq_rel);
+	\\            const prev = rocRefcountSub(rc);
 	\\            if (prev == 1) {
 	\\                if (elements_refcounted) {
 	\\                    for (self.allocationItems()) |item| {
@@ -651,7 +651,7 @@ generate_roc_list_generic =
 	\\            const alloc_ptr = self.getAllocationPtr() orelse return;
 	\\            const rc: *isize = @ptrFromInt(@intFromPtr(alloc_ptr) - @sizeOf(isize));
 	\\            if (rc.* == 0) return; // REFCOUNT_STATIC_DATA
-	\\            _ = @atomicRmw(isize, rc, .Add, amount, .monotonic);
+	\\            _ = rocRefcountAdd(rc, amount);
 	\\        }
 	\\
 	\\        /// Return true if this list has a reference count of exactly one.
@@ -1860,6 +1860,25 @@ generate_imports =
 ## Generate self-contained host ABI type definitions
 generate_host_abi_types : Str
 generate_host_abi_types =
+	\\/// Freestanding platforms hold the recursive runtime lock across all value operations.
+	\\fn rocRefcountAdd(rc: *isize, amount: isize) isize {
+	\\    if (comptime builtin.os.tag == .freestanding and !builtin.cpu.arch.isWasm()) {
+	\\        const previous = rc.*;
+	\\        rc.* = previous +% amount;
+	\\        return previous;
+	\\    }
+	\\    return @atomicRmw(isize, rc, .Add, amount, .monotonic);
+	\\}
+	\\
+	\\fn rocRefcountSub(rc: *isize) isize {
+	\\    if (comptime builtin.os.tag == .freestanding and !builtin.cpu.arch.isWasm()) {
+	\\        const previous = rc.*;
+	\\        rc.* = previous -% 1;
+	\\        return previous;
+	\\    }
+	\\    return @atomicRmw(isize, rc, .Sub, 1, .acq_rel);
+	\\}
+	\\
 	\\/// Runtime representation of Roc's fixed-point `Dec` value.
 	\\///
 	\\/// `num` stores the decimal value scaled by 10^18.
@@ -1979,7 +1998,7 @@ generate_roc_box_helpers =
 	\\    const data = boxDataPtr(data_ptr) orelse return;
 	\\    const rc = boxRefcountPtr(data);
 	\\    if (rc.* == 0) return; // REFCOUNT_STATIC_DATA
-	\\    _ = @atomicRmw(isize, rc, .Add, amount, .monotonic);
+	\\    _ = rocRefcountAdd(rc, amount);
 	\\}
 	\\
 	\\/// Allocate a Roc box and return a pointer to its payload data.
@@ -2044,7 +2063,7 @@ generate_roc_box_helpers =
 	\\    const rc = boxRefcountPtr(data);
 	\\    if (rc.* == 0) return; // REFCOUNT_STATIC_DATA
 	\\
-	\\    const prev = @atomicRmw(isize, rc, .Sub, 1, .monotonic);
+	\\    const prev = rocRefcountSub(rc);
 	\\    if (prev == 1) {
 	\\        if (payload_decref) |callback| callback(data_ptr, roc_host);
 	\\        freeBoxAllocation(data, payload_alignment, payload_contains_refcounted, roc_host);
@@ -2195,7 +2214,7 @@ generate_roc_str =
 	\\        const data_addr = @intFromPtr(alloc_ptr);
 	\\        const rc: *isize = @ptrFromInt(data_addr - @sizeOf(isize));
 	\\        if (rc.* == 0) return; // REFCOUNT_STATIC_DATA—bytes are in read-only memory
-	\\        const prev = @atomicRmw(isize, rc, .Sub, 1, .monotonic);
+	\\        const prev = rocRefcountSub(rc);
 	\\        if (prev == 1) {
 	\\            const ptr_width = @sizeOf(usize);
 	\\            const base: *anyopaque = @ptrFromInt(data_addr - ptr_width);
@@ -2209,7 +2228,7 @@ generate_roc_str =
 	\\        const alloc_ptr = self.getAllocationPtr() orelse return;
 	\\        const rc: *isize = @ptrFromInt(@intFromPtr(alloc_ptr) - @sizeOf(isize));
 	\\        if (rc.* == 0) return; // REFCOUNT_STATIC_DATA
-	\\        _ = @atomicRmw(isize, rc, .Add, amount, .monotonic);
+	\\        _ = rocRefcountAdd(rc, amount);
 	\\    }
 	\\
 	\\    /// Return true if this string has a reference count of exactly one.
@@ -2373,10 +2392,12 @@ generate_runtime_symbol_externs =
 	\\/// Must never return: end the process, or longjmp out of the Roc code that called
 	\\/// it. Roc code traps right after this call, so returning terminates the process.
 	\\pub extern fn roc_crashed(bytes: [*]const u8, len: usize) callconv(.c) void;
-	\\/// Native FreeRTOS task-local pointer callbacks; initially null.
+	\\/// Native freestanding task-local pointer callbacks; initially null.
 	\\pub extern fn roc_get_task_state() callconv(.c) ?*anyopaque;
 	\\pub extern fn roc_set_task_state(state: ?*anyopaque) callconv(.c) void;
 	\\/// One shared recursive mutex; acquire waits until owned.
+	\\/// Native freestanding hosts must hold it for all Roc value operations,
+	\\/// including retain/release and uniqueness checks outside Roc calls.
 	\\pub extern fn roc_acquire_runtime_lock() callconv(.c) void;
 	\\pub extern fn roc_release_runtime_lock() callconv(.c) void;
 	\\/// Runtime cleanup, called outside Roc before task deletion.

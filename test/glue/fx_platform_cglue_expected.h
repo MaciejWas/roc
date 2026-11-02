@@ -922,6 +922,16 @@ ROC_RETURNS_NONNULL void* roc_realloc(void* ptr, size_t new_length, size_t align
 void roc_dbg(const uint8_t* bytes, size_t len);
 void roc_expect_failed(const uint8_t* bytes, size_t len);
 void roc_crashed(const uint8_t* bytes, size_t len);
+/* Native freestanding platforms store this opaque pointer in the current task. */
+void* roc_get_task_state(void);
+void roc_set_task_state(void* state);
+/* One shared recursive mutex: acquire blocks until owned; release balances acquire.
+   Native freestanding hosts hold it for all Roc value operations, including
+   retain/release and uniqueness checks outside Roc calls. */
+void roc_acquire_runtime_lock(void);
+void roc_release_runtime_lock(void);
+/* Runtime function: call after releasing Roc values and returning from Roc. */
+void roc_cleanup_task_state(void);
 
 // Hosted Symbols
 

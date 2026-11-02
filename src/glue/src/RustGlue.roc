@@ -930,7 +930,9 @@ generate_rust_imports : Str
 generate_rust_imports =
 	\\use core::ffi::c_void;
 	\\use core::ptr::NonNull;
-	\\use core::sync::atomic::{fence, AtomicIsize, Ordering};
+	\\use core::sync::atomic::Ordering;
+	\\#[cfg(not(all(target_os = "none", not(target_family = "wasm"))))]
+	\\use core::sync::atomic::{fence, AtomicIsize};
 	\\#[cfg(not(no_roc_std_helpers))]
 	\\use std::alloc::Layout;
 	\\
@@ -938,6 +940,33 @@ generate_rust_imports =
 ## Generate self-contained host ABI type definitions (matching roc_ops.rs)
 generate_host_abi_types_rust : Str
 generate_host_abi_types_rust =
+	\\// Native freestanding hosts hold the runtime lock across all value operations.
+	\\unsafe fn roc_refcount_load(rc: *const isize, order: Ordering) -> isize {
+	\\    #[cfg(all(target_os = "none", not(target_family = "wasm")))]
+	\\    { let _ = order; unsafe { rc.read() } }
+	\\    #[cfg(not(all(target_os = "none", not(target_family = "wasm"))))]
+	\\    { unsafe { (&*rc.cast::<AtomicIsize>()).load(order) } }
+	\\}
+	\\
+	\\unsafe fn roc_refcount_add(rc: *mut isize, amount: isize) -> isize {
+	\\    #[cfg(all(target_os = "none", not(target_family = "wasm")))]
+	\\    { unsafe { let previous = rc.read(); rc.write(previous.wrapping_add(amount)); previous } }
+	\\    #[cfg(not(all(target_os = "none", not(target_family = "wasm"))))]
+	\\    { unsafe { (&*rc.cast::<AtomicIsize>()).fetch_add(amount, Ordering::Relaxed) } }
+	\\}
+	\\
+	\\unsafe fn roc_refcount_sub(rc: *mut isize) -> isize {
+	\\    #[cfg(all(target_os = "none", not(target_family = "wasm")))]
+	\\    { unsafe { let previous = rc.read(); rc.write(previous.wrapping_sub(1)); previous } }
+	\\    #[cfg(not(all(target_os = "none", not(target_family = "wasm"))))]
+	\\    { unsafe { (&*rc.cast::<AtomicIsize>()).fetch_sub(1, Ordering::Release) } }
+	\\}
+	\\
+	\\fn roc_refcount_acquire() {
+	\\    #[cfg(not(all(target_os = "none", not(target_family = "wasm"))))]
+	\\    fence(Ordering::Acquire);
+	\\}
+	\\
 	\\/// Runtime representation of Roc's fixed-point `Dec` value.
 	\\///
 	\\/// `num` stores the decimal value scaled by 10^18.
@@ -1199,11 +1228,11 @@ generate_roc_box_helpers_rust =
 	\\        None => return,
 	\\    };
 	\\    let rc = box_refcount_ptr(data);
-	\\    if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\    if unsafe { roc_refcount_load(rc, Ordering::Relaxed) } == 0 {
 	\\        return; // REFCOUNT_STATIC_DATA
 	\\    }
 	\\    unsafe {
-	\\        (*rc).fetch_add(amount, Ordering::Relaxed);
+	\\        roc_refcount_add(rc, amount);
 	\\    }
 	\\}
 	\\
@@ -1304,12 +1333,12 @@ generate_roc_box_helpers_rust =
 	\\        None => return,
 	\\    };
 	\\    let rc = box_refcount_ptr(data);
-	\\    if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\    if unsafe { roc_refcount_load(rc, Ordering::Relaxed) } == 0 {
 	\\        return; // REFCOUNT_STATIC_DATA
 	\\    }
-	\\    let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\    let prev = unsafe { roc_refcount_sub(rc) };
 	\\    if prev == 1 {
-	\\        fence(Ordering::Acquire);
+	\\        roc_refcount_acquire();
 	\\        if let Some(callback) = payload_decref {
 	\\            callback(data_ptr, roc_host as *const RocHost as *mut RocHost);
 	\\        }
@@ -1347,7 +1376,7 @@ generate_roc_box_helpers_rust =
 	\\        None => return true,
 	\\    };
 	\\    let rc = box_refcount_ptr(data);
-	\\    unsafe { (*rc).load(Ordering::Acquire) == 1 }
+	\\    unsafe { roc_refcount_load(rc, Ordering::Acquire) == 1 }
 	\\}
 	\\
 	\\fn box_data_ptr(data_ptr: RocBox) -> Option<*mut u8> {
@@ -1358,8 +1387,8 @@ generate_roc_box_helpers_rust =
 	\\    }
 	\\}
 	\\
-	\\fn box_refcount_ptr(data: *mut u8) -> *mut AtomicIsize {
-	\\    unsafe { data.sub(core::mem::size_of::<isize>()) as *mut AtomicIsize }
+	\\fn box_refcount_ptr(data: *mut u8) -> *mut isize {
+	\\    unsafe { data.sub(core::mem::size_of::<isize>()) as *mut isize }
 	\\}
 	\\
 	\\fn free_box_allocation(
@@ -1521,13 +1550,13 @@ generate_rust_roc_str =
 	\\        if alloc_ptr.is_null() {
 	\\            return;
 	\\        }
-	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
-	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        let rc = unsafe { (alloc_ptr as *mut isize).sub(1) };
+	\\        if unsafe { roc_refcount_load(rc, Ordering::Relaxed) } == 0 {
 	\\            return; // REFCOUNT_STATIC_DATA—bytes are in read-only memory
 	\\        }
-	\\        let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\        let prev = unsafe { roc_refcount_sub(rc) };
 	\\        if prev == 1 {
-	\\            fence(Ordering::Acquire);
+	\\            roc_refcount_acquire();
 	\\            let ptr_width = core::mem::size_of::<usize>();
 	\\            let base = unsafe { alloc_ptr.sub(ptr_width) } as *mut c_void;
 	\\            unsafe {
@@ -1549,12 +1578,12 @@ generate_rust_roc_str =
 	\\        if alloc_ptr.is_null() {
 	\\            return;
 	\\        }
-	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
-	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        let rc = unsafe { (alloc_ptr as *mut isize).sub(1) };
+	\\        if unsafe { roc_refcount_load(rc, Ordering::Relaxed) } == 0 {
 	\\            return; // REFCOUNT_STATIC_DATA
 	\\        }
 	\\        unsafe {
-	\\            (*rc).fetch_add(amount, Ordering::Relaxed);
+	\\            roc_refcount_add(rc, amount);
 	\\        }
 	\\    }
 	\\
@@ -1568,8 +1597,8 @@ generate_rust_roc_str =
 	\\            return true;
 	\\        }
 	\\        unsafe {
-	\\            let rc = (alloc_ptr as *const AtomicIsize).sub(1);
-	\\            let count = (*rc).load(Ordering::Acquire);
+	\\            let rc = (alloc_ptr as *const isize).sub(1);
+	\\            let count = roc_refcount_load(rc, Ordering::Acquire);
 	\\            count == 0 || count == 1
 	\\        }
 	\\    }
@@ -1920,13 +1949,13 @@ generate_rust_roc_list =
 	\\        }
 	\\        let align = core::mem::align_of::<T>().max(core::mem::align_of::<usize>());
 	\\        let header_bytes = Self::header_bytes();
-	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
-	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        let rc = unsafe { (alloc_ptr as *mut isize).sub(1) };
+	\\        if unsafe { roc_refcount_load(rc, Ordering::Relaxed) } == 0 {
 	\\            return; // REFCOUNT_STATIC_DATA—elements are in read-only memory
 	\\        }
-	\\        let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\        let prev = unsafe { roc_refcount_sub(rc) };
 	\\        if prev == 1 {
-	\\            fence(Ordering::Acquire);
+	\\            roc_refcount_acquire();
 	\\            let base = unsafe { alloc_ptr.sub(header_bytes) } as *mut c_void;
 	\\            unsafe {
 	\\                roc_host.dealloc(base, align);
@@ -1956,13 +1985,13 @@ generate_rust_roc_list =
 	\\        }
 	\\        let align = core::mem::align_of::<T>().max(core::mem::align_of::<usize>());
 	\\        let header_bytes = Self::header_bytes();
-	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
-	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        let rc = unsafe { (alloc_ptr as *mut isize).sub(1) };
+	\\        if unsafe { roc_refcount_load(rc, Ordering::Relaxed) } == 0 {
 	\\            return; // REFCOUNT_STATIC_DATA—elements are in read-only memory
 	\\        }
-	\\        let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\        let prev = unsafe { roc_refcount_sub(rc) };
 	\\        if prev == 1 {
-	\\            fence(Ordering::Acquire);
+	\\            roc_refcount_acquire();
 	\\            if ELEMENTS_REFCOUNTED {
 	\\                for item_ref in self.allocation_items() {
 	\\                    let item = unsafe { core::ptr::read(item_ref) };
@@ -1987,12 +2016,12 @@ generate_rust_roc_list =
 	\\        if alloc_ptr.is_null() {
 	\\            return;
 	\\        }
-	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
-	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        let rc = unsafe { (alloc_ptr as *mut isize).sub(1) };
+	\\        if unsafe { roc_refcount_load(rc, Ordering::Relaxed) } == 0 {
 	\\            return; // REFCOUNT_STATIC_DATA
 	\\        }
 	\\        unsafe {
-	\\            (*rc).fetch_add(amount, Ordering::Relaxed);
+	\\            roc_refcount_add(rc, amount);
 	\\        }
 	\\    }
 	\\
@@ -2003,8 +2032,8 @@ generate_rust_roc_list =
 	\\            return true;
 	\\        }
 	\\        unsafe {
-	\\            let rc = (alloc_ptr as *const AtomicIsize).sub(1);
-	\\            let count = (*rc).load(Ordering::Acquire);
+	\\            let rc = (alloc_ptr as *const isize).sub(1);
+	\\            let count = roc_refcount_load(rc, Ordering::Acquire);
 	\\            count == 0 || count == 1
 	\\        }
 	\\    }
@@ -2016,8 +2045,8 @@ generate_rust_roc_list =
 	\\            return false;
 	\\        }
 	\\        unsafe {
-	\\            let rc = (alloc_ptr as *const AtomicIsize).sub(1);
-	\\            (*rc).load(Ordering::Acquire) == 1
+	\\            let rc = (alloc_ptr as *const isize).sub(1);
+	\\            roc_refcount_load(rc, Ordering::Acquire) == 1
 	\\        }
 	\\    }
 	\\}
@@ -2853,10 +2882,12 @@ generate_runtime_symbol_externs_rust =
 	\\    /// Must never return: end the process. Roc code traps right after this
 	\\    /// call, so returning terminates the process.
 	\\    pub fn roc_crashed(bytes: *const u8, len: usize);
-	\\    // Native FreeRTOS task-local pointer callbacks; initially null.
+	\\    // Native freestanding task-local pointer callbacks; initially null.
 	\\    pub fn roc_get_task_state() -> *mut c_void;
 	\\    pub fn roc_set_task_state(state: *mut c_void);
 	\\    // One shared recursive mutex; acquire waits until owned.
+	\\// Native freestanding hosts must hold it for all Roc value operations,
+	\\// including retain/release and uniqueness checks outside Roc calls.
 	\\    pub fn roc_acquire_runtime_lock();
 	\\    pub fn roc_release_runtime_lock();
 	\\    // Runtime cleanup, called outside Roc before task deletion.

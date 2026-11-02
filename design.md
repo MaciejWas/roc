@@ -24554,10 +24554,12 @@ producer metadata; only non-debug size builds remove target-feature metadata.
 
 ## Host Symbol ABI
 
-The initial embedded RISC-V target is `riscv64elf`: little-endian RV64IA,
+The initial embedded RISC-V target is `riscv64elf`: little-endian RV64I,
 freestanding ELF, with the LP64 integer calling convention and no libc or
-host feature detection. Its CPU contract requires atomic instructions (`A`) and excludes other optional
-ISA extensions. Target registration does not imply code-generation support:
+host feature detection. Its CPU contract excludes optional ISA extensions.
+Native freestanding reference-count updates use ordinary loads and stores
+under the platform runtime lock; this includes glue and platform-side value operations.
+Target registration does not imply code-generation support:
 LP64 layout classification consumes committed layouts and uses the standard
 integer calling convention, including integer-chunk transport for floats and
 fixed-length vectors. The LP64 LLVM call plan reuses AArch64's exact-byte
@@ -24576,9 +24578,9 @@ and whole arguments that exceed that budget use the existing caller-owned group
 storage; the storage pointer is reserved before assigning direct slots. Members
 copy stored arguments on entry before that storage is reused. Argument and return
 adapters preserve the external LP64 ABI. Self-tail loops and other targets keep
-their existing conventions. The compiler bundles RV64IA builtins (including
+their existing conventions. The compiler bundles RV64I builtins (including
 compiler-rt) and standalone boxy runtime objects with their own content digests.
-The normal LLVM build selects dedicated full/core RV64IA symbol-ABI builtin
+The normal LLVM build selects dedicated full/core RV64I symbol-ABI builtin
 bitcode so Zig resolves task-local state for the native target, rather than
 reusing Wasm's global state. The platform-facing `roc_cleanup_task_state`
 export remains external through builtin pruning and final optimization even
@@ -24614,7 +24616,8 @@ Roc execution through the platform rather than returning a null pointer.
 Shared bookkeeping retains its existing runtime lifetime. Other targets retain
 their existing allocation providers.
 
-Native freestanding RISC-V output assumes a FreeRTOS platform. Multiple tasks
+Native freestanding output requires platform-managed task state and locking.
+The example implements this with FreeRTOS. Multiple tasks
 may call Roc, with execution serialized by a platform-wide recursive mutex.
 The platform implements C-convention `roc_get_task_state() -> ptr`
 and `roc_set_task_state(ptr)` using one task-local storage slot, initially null.
@@ -24638,7 +24641,8 @@ other targets retain their existing entry behavior. Calls that do not return
 normally require platform-level termination; cooperative shutdown does not
 unwind an interrupted Roc call. Direct internal runtime entry and glue value
 operations outside generated wrappers must also be enclosed by the platform
-in this same mutex when they access shared Roc runtime data.
+in this same mutex for all Roc value and runtime operations, including
+reference-count updates and uniqueness checks.
 
 Shutdown is cooperative: the task returns from every Roc invocation, releases
 its owned Roc values, and calls the runtime's C-convention
