@@ -1,3 +1,14 @@
+# What is this?
+
+This is a fork of the ROC compiler on top of which I'm adding funcitonality I'm interested in. For now this is
+
+* 32/64 bit RISC-V support as compilation target
+* ( General support for embedded use of ROC. I'll be writing more features here as they come)
+
+> [!WARNING]  
+> This is largely AI slop. I make an effort to review every single line of code but I'm neither a compiler engineer nor an embedded developer so 
+> certain things might be implemented poorly or in a way which is not maintainable long term.
+
 # Work in progress!
 
 [Roc](https://www.roc-lang.org) is not ready for a 0.1 release yet, but we do have:
