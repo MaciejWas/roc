@@ -671,7 +671,7 @@ const EmbeddedTargetObjects = struct {
     fn forTarget(requested: RocTarget) EmbeddedTargetObjects {
         if (requested == .wasm32v1) return comptime cross(.wasm32v1, .none);
         return switch (requested.defaultCpuTarget()) {
-            .riscv64elf => @panic("TODO: embed RISC-V runtime objects"),
+            .riscv64elf => comptime cross(.riscv64elf, .none),
             inline .x64musl,
             .arm64musl,
             .x64glibc,
@@ -8270,9 +8270,11 @@ fn rocBuildOnce(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
 fn rocBuildDefaultApp(ctx: *CliCtx, args: cli_args.BuildArgs, staged: *default_app.Staged) CliMainError!BuildResult {
     defer staged.deinit(ctx.gpa);
 
-    if (defaultBuildTarget(args).toOsTag() == .openbsd) {
+    const target = defaultBuildTarget(args);
+    if (target.runtimeAbi() == .task_local or target.toOsTag() == .openbsd) {
         return ctx.fail(.{ .unsupported_default_platform_target = .{
-            .target = "x64openbsd",
+            .target = target.toName(),
+            .reason = if (target.runtimeAbi() == .task_local) .platform_required else .missing_sysroot,
         } });
     }
 
@@ -8349,6 +8351,7 @@ fn writeDefaultWindowsRuntime(ctx: *CliCtx, platform_dir: []const u8, args: cli_
 }
 
 fn defaultBuildPlatformSource(args: cli_args.BuildArgs) []const u8 {
+    std.debug.assert(defaultBuildTarget(args).runtimeAbi() == .standard);
     if (args.target) |target_str| {
         if (RocTarget.fromString(target_str)) |requested| {
             if (requested.defaultCpuTarget() == .wasm32) return echo_platform.build_wasm_archive_platform_main_source;
@@ -8633,7 +8636,7 @@ fn verifyHostInputSymbols(
     }
 
     var needed = std.ArrayList([]const u8).empty;
-    try needed.appendSlice(ctx.arena, host_symbols.runtimeSymbols(target.toCpuArch(), target.toOsTag()));
+    try needed.appendSlice(ctx.arena, host_symbols.runtimeSymbols(target));
     try needed.appendSlice(ctx.arena, hosted_symbols);
 
     const result = try host_symbols.scanHostInputs(ctx.arena, ctx.io.std_io, host_input_paths, needed.items);
@@ -9865,6 +9868,7 @@ fn compileLlvmAppObject(
             .host_call_extern = true,
             .sha256_rounds = Sha256Rounds.forCpu(std_target.cpu),
             .stack_checked = stack_checks,
+            .export_platform_runtime = true,
         },
         .pic = pic,
         .no_target_libcalls = noTargetLibcallsForLlvmBuild(target),
@@ -10990,7 +10994,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
 
     const target_arch = target.toCpuArch();
     const target_os = target.toOsTag();
-    if (target_arch != .x86_64 and target_arch != .aarch64 and target_arch != .wasm32) {
+    if (!target.supportsLlvm()) {
         try ctx.io.stderr().print(
             "Error: roc build --opt={s} does not support the '{s}' architecture.\n",
             .{ @tagName(args.opt), @tagName(target_arch) },
@@ -12397,7 +12401,7 @@ fn linkNativeBuild(
         const inspection_started = std.Io.Timestamp.now(ctx.io.std_io, .awake);
         var needed: std.ArrayList([]const u8) = .empty;
         if (!(host_paths.len == 0 and args.synthetic_default_platform)) {
-            try needed.appendSlice(ctx.arena, host_symbols.runtimeSymbols(target.toCpuArch(), target.toOsTag()));
+            try needed.appendSlice(ctx.arena, host_symbols.runtimeSymbols(target));
             try needed.appendSlice(ctx.arena, facts.hosted_symbols);
         }
         const inspected = try host_symbols.inspect(ctx.arena, ctx.io.std_io, host_paths, needed.items, link_type == .shared);

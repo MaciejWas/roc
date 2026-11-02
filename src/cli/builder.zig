@@ -70,6 +70,9 @@ pub const OptimizationLevel = enum {
 pub const LinkedBuiltins = struct {
     /// Builtins reach the host via extern symbols (the symbol ABI).
     host_call_extern: bool,
+    /// Only the final platform app object owns public runtime entry points;
+    /// cached procedure packs link their used builtins privately.
+    export_platform_runtime: bool = false,
     /// The SHA-256 rounds the target's CPU features select
     /// (`builtins.sha256.Rounds.forCpu` of the CPU that `cpu` and `features`
     /// name). The 64-bit builtin payload links the compression function built
@@ -195,6 +198,7 @@ const LLVMRelocPIC: c_int = 2;
 
 // LLVM Code Models
 const LLVMCodeModelDefault: c_int = 0;
+const LLVMCodeModelMedium: c_int = 5;
 
 // External C functions from zig_llvm.cpp and LLVM C API - only available when LLVM is enabled
 const llvm_externs = if (llvm_available) struct {
@@ -307,6 +311,8 @@ const llvm_embedded = if (llvm_available) @import("llvm_embedded") else struct {
     pub const sha256_aarch64_sha2_bc: []const u8 = "";
     pub const PrivateRuntime = struct { target: target.RocTarget, bitcode: []const u8 };
     pub const private_runtimes = [_]PrivateRuntime{};
+    pub const BuiltinRuntime = struct { target: target.RocTarget, full: []const u8, core: []const u8 };
+    pub const builtin_runtimes = [_]BuiltinRuntime{};
 };
 
 const core_builtin_roots = builtin_registry.core_root_symbols;
@@ -323,8 +329,18 @@ fn canUseCoreBuiltins(app_decls: *const std.StringHashMap(void)) bool {
     return true;
 }
 
-fn selectBuiltinBitcode(ptr_width: u16, app_decls: *const std.StringHashMap(void), host_call_extern: bool, stack_checked: bool) []const u8 {
+fn selectBuiltinBitcode(roc_target: target.RocTarget, app_decls: *const std.StringHashMap(void), host_call_extern: bool, stack_checked: bool) []const u8 {
+    const ptr_width = roc_target.ptrBitWidth();
     const use_core = canUseCoreBuiltins(app_decls);
+    if (host_call_extern) {
+        if (roc_target.llvmBuiltinRuntimeTarget()) |runtime_target| {
+            std.debug.assert(!stack_checked);
+            for (llvm_embedded.builtin_runtimes) |runtime| {
+                if (runtime.target == runtime_target) return if (use_core) runtime.core else runtime.full;
+            }
+            unreachable; // build.zig embeds every declared native builtin runtime
+        }
+    }
     if (stack_checked) {
         if (ptr_width != 32 or !host_call_extern) {
             base.invariant("LLVM builtins invariant violated: stack-checked builtins requested for {d}-bit {s} output", .{ ptr_width, if (host_call_extern) "symbol-ABI" else "RocOps-ABI" });
@@ -548,6 +564,24 @@ pub fn initializeLLVM() void {
     externs.ZigLLVMInitializeAllTargets();
 }
 
+/// Platform entry points into the builtin runtime are roots even when Roc
+/// itself never calls them: their callers live in the separately linked host.
+fn isPlatformRuntimeExport(roc_target: target.RocTarget, linked: LinkedBuiltins, name: []const u8) bool {
+    return roc_target.runtimeAbi() == .task_local and linked.host_call_extern and linked.export_platform_runtime and
+        std.mem.eql(u8, name, builtins.shim_symbols.roc_cleanup_task_state);
+}
+
+test "FreeRTOS task cleanup is public only for RISC-V platform output" {
+    const linked: LinkedBuiltins = .{ .host_call_extern = true, .export_platform_runtime = true, .sha256_rounds = .portable };
+    const name = builtins.shim_symbols.roc_cleanup_task_state;
+    try std.testing.expect(isPlatformRuntimeExport(.riscv64elf, linked, name));
+    try std.testing.expect(!isPlatformRuntimeExport(.wasm32, linked, name));
+    try std.testing.expect(!isPlatformRuntimeExport(.x64musl, linked, name));
+    try std.testing.expect(!isPlatformRuntimeExport(.riscv64elf, .{ .host_call_extern = false, .sha256_rounds = .portable }, name));
+    try std.testing.expect(!isPlatformRuntimeExport(.riscv64elf, linked, "roc_alloc"));
+    try std.testing.expect(!isPlatformRuntimeExport(.riscv64elf, .{ .host_call_extern = true, .sha256_rounds = .portable }, name));
+}
+
 /// Compile LLVM bitcode file to object file
 pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileConfig) (Allocator.Error || error{LLVMNotAvailable})!bool {
     if (comptime !llvm_available) {
@@ -668,7 +702,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
             try app_defs.put(name, {});
         }
 
-        const builtins_bc = selectBuiltinBitcode(config.target.ptrBitWidth(), &app_decls, linked_builtins.host_call_extern, linked_builtins.stack_checked);
+        const builtins_bc = selectBuiltinBitcode(config.target, &app_decls, linked_builtins.host_call_extern, linked_builtins.stack_checked);
         if (builtins_bc.len == 0) {
             std.log.err("No embedded builtin bitcode for {d}-bit target pointers", .{config.target.ptrBitWidth()});
             return false;
@@ -706,7 +740,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
             while (builtin_alias) |a| : (builtin_alias = externs.LLVMGetNextGlobalAlias(a)) {
                 var name_len: usize = 0;
                 const name_ptr = externs.LLVMGetValueName2(a, &name_len);
-                if (!app_decls.contains(name_ptr[0..name_len])) {
+                if (!app_decls.contains(name_ptr[0..name_len]) and !isPlatformRuntimeExport(config.target, linked_builtins, name_ptr[0..name_len])) {
                     externs.LLVMSetLinkage(a, LLVMInternalLinkage);
                 }
             }
@@ -764,7 +798,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
                     externs.LLVMAddAttributeAtIndex(fv, LLVMAttributeFunctionIndex, inlinehint_attr);
                 }
 
-                if (!app_decls.contains(name)) {
+                if (!app_decls.contains(name) and !isPlatformRuntimeExport(config.target, linked_builtins, name)) {
                     externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
                 }
             }
@@ -787,7 +821,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
                 while (alias) |a| : (alias = externs.LLVMGetNextGlobalAlias(a)) {
                     var name_len: usize = 0;
                     const name_ptr = externs.LLVMGetValueName2(a, &name_len);
-                    if (app_defs.contains(name_ptr[0..name_len])) continue;
+                    if (app_defs.contains(name_ptr[0..name_len]) or isPlatformRuntimeExport(config.target, linked_builtins, name_ptr[0..name_len])) continue;
                     if (externs.LLVMAliasGetAliasee(a)) |aliasee| {
                         externs.LLVMReplaceAllUsesWith(a, aliasee);
                     }
@@ -805,7 +839,8 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
                         // machine still controls CPU/features at codegen.
                         externs.LLVMRemoveStringAttributeAtIndex(fv, LLVMAttributeFunctionIndex, "target-features", "target-features".len);
                         externs.LLVMRemoveStringAttributeAtIndex(fv, LLVMAttributeFunctionIndex, "target-cpu", "target-cpu".len);
-                        externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
+                        if (!isPlatformRuntimeExport(config.target, linked_builtins, name_ptr[0..name_len]))
+                            externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
                     }
                 }
 
@@ -890,7 +925,13 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
         features_z.ptr,
         config.optimization.toLLVMCodeGenLevel(),
         if (config.pic) LLVMRelocPIC else LLVMRelocDefault,
-        LLVMCodeModelDefault,
+        // RISC-V firmware may be linked anywhere within one 2 GiB window,
+        // including QEMU virt RAM at 0x80000000, outside medlow addressing.
+        switch (config.target.llvmCodeModel()) {
+            .default => LLVMCodeModelDefault,
+            .medium => LLVMCodeModelMedium,
+            else => unreachable, // Roc target metadata only selects default and medium
+        },
         true, // function_sections
         true, // data_sections
         .ZigLLVMABITypeDefault, // float_abi

@@ -59,7 +59,7 @@ const Component = struct {
     destroy: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 const TaskState = struct {
-    components: [3]?Component = .{ null, null, null },
+    components: std.EnumArray(TaskSlot, ?Component) = .initFill(null),
     allocator: std.mem.Allocator,
 };
 
@@ -77,7 +77,7 @@ pub fn taskState(comptime State: type, comptime slot: TaskSlot, comptime deinit:
 }
 
 fn componentState(comptime State: type, comptime slot: TaskSlot, comptime deinit: fn (*State, std.mem.Allocator) void, root: *TaskState) *State {
-    const component = &root.components[@backingInt(slot)];
+    const component = root.components.getPtr(slot);
     if (component.*) |existing| return @ptrCast(@alignCast(existing.value));
     const state = root.allocator.create(State) catch @import("in_process_host.zig").ops().crash("out of memory allocating task component");
     state.* = .{};
@@ -102,7 +102,7 @@ pub fn cleanupTaskState() callconv(.c) void {
     const ptr = host.roc_get_task_state() orelse return;
     const root: *TaskState = @ptrCast(@alignCast(ptr));
     const gpa = root.allocator;
-    for (root.components) |component| if (component) |owner| owner.destroy(owner.value, gpa);
+    for (root.components.values) |component| if (component) |owner| owner.destroy(owner.value, gpa);
     host.roc_set_task_state(null);
     gpa.destroy(root);
 }
@@ -121,10 +121,16 @@ test "task-state components are separate, reused, and cleaned before recreation"
     try a.bytes.append(first.allocator, 42);
     try std.testing.expectEqual(a, componentState(State, .tail, State.deinit, &first));
     try std.testing.expectEqual(@as(usize, 0), b.bytes.items.len);
-    for (first.components) |component| if (component) |owner| owner.destroy(owner.value, first.allocator);
-    first.components = .{ null, null, null };
+    for (first.components.values) |component| if (component) |owner| owner.destroy(owner.value, first.allocator);
+    first.components = .initFill(null);
     const fresh = componentState(State, .tail, State.deinit, &first);
     try std.testing.expectEqual(@as(usize, 0), fresh.bytes.items.len);
-    for (first.components) |component| if (component) |owner| owner.destroy(owner.value, first.allocator);
-    for (second.components) |component| if (component) |owner| owner.destroy(owner.value, second.allocator);
+    for (first.components.values) |component| if (component) |owner| owner.destroy(owner.value, first.allocator);
+    for (second.components.values) |component| if (component) |owner| owner.destroy(owner.value, second.allocator);
+}
+
+/// Both the full and core symbol-ABI roots expose the same lifecycle entry.
+pub fn exportTaskCleanup() void {
+    if (native_freestanding)
+        @export(&cleanupTaskState, .{ .name = @import("shim_symbols.zig").roc_cleanup_task_state });
 }

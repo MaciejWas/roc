@@ -3468,7 +3468,7 @@ pub const MonoLlvmCodeGen = struct {
     }
 
     fn emitPlatformRuntimeLock(self: *MonoLlvmCodeGen, comptime acquire: bool) Error!void {
-        if (self.program_kind != .platform or self.target.os.tag != .freestanding or self.target.cpu.arch.isWasm()) return;
+        if (self.program_kind != .platform or roc_target.runtimeAbiForTarget(self.target.cpu.arch, self.target.os.tag) != .task_local) return;
         const builder = self.builder orelse return error.CompilationFailed;
         const wip = self.wip orelse return error.CompilationFailed;
         const fn_ty = builder.fnType(.void, &.{}, .normal) catch return error.OutOfMemory;
@@ -16155,7 +16155,7 @@ test "LP64 LLVM carriers reuse ARM exact-byte packing and bitcast software float
     defer codegen.builder = null;
 
     for ([_]layout.Idx{ nine, .f32, .f64 }, [_][]const u8{ "lp64_nine", "lp64_float", "lp64_double" }) |idx, name| {
-        const plan = try layout.abi.call.lowerRiscv64(arena, &layouts, &.{idx}, idx, false);
+        const plan = try layout.abi.lower(arena, &layouts, .riscv64_lp64, &.{idx}, idx, false);
         const carrier = try codegen.cAbiRegisterCarrierType(&builder, plan.ret.registers);
         const ptr_ty = try builder.ptrType(.default);
         const function = try builder.addFunction(
