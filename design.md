@@ -24330,10 +24330,10 @@ producer metadata; only non-debug size builds remove target-feature metadata.
 
 ## Host Symbol ABI
 
-The initial embedded RISC-V target is `riscv64elf`: little-endian RV64I,
+The initial embedded RISC-V target is `riscv64elf`: little-endian RV64IA,
 freestanding ELF, with the LP64 integer calling convention and no libc or
-host feature detection. Its CPU contract explicitly excludes optional ISA
-extensions. Target registration does not imply code-generation support:
+host feature detection. Its CPU contract requires atomic instructions (`A`) and excludes other optional
+ISA extensions. Target registration does not imply code-generation support:
 LP64 layout classification consumes committed layouts and uses the standard
 integer calling convention, including integer-chunk transport for floats and
 fixed-length vectors. The staged LP64 LLVM call plan reuses AArch64's exact-byte
@@ -24354,6 +24354,52 @@ copy stored arguments on entry before that storage is reused. Argument and retur
 adapters preserve the external LP64 ABI. Self-tail loops and other targets keep
 their existing conventions. Runtime integration remains unfinished and must not
 borrow another target's artifacts.
+
+On native freestanding targets, the standalone boxy runtime allocates its own
+bookkeeping through the platform's existing allocation symbols, just like Roc
+values. It does not request OS pages or impose its own fixed-size memory pool.
+The adapter preserves requested size and alignment, forwards reallocations and
+frees, and follows the existing host contract: allocation failure terminates
+Roc execution through the platform rather than returning a null pointer.
+Shared bookkeeping retains its existing runtime lifetime. Other targets retain
+their existing allocation providers.
+
+Native freestanding RISC-V output assumes a FreeRTOS platform. Multiple tasks
+may call Roc, with execution serialized by a platform-wide recursive mutex.
+The platform implements C-convention `roc_get_task_state() -> ptr`
+and `roc_set_task_state(ptr)` using one task-local storage slot, initially null.
+The pointer is opaque to the platform. Callbacks do not enter Roc and are not
+called from interrupts. The runtime allocates one task root and explicitly
+registered callable, active-runtime, and tail-state components through platform
+allocation. No ID tables, shared lookup locks, native TLS, or OS thread lookup
+are used for this state on freestanding targets.
+
+The platform also supplies C-convention `roc_acquire_runtime_lock() -> void`
+and `roc_release_runtime_lock() -> void`, backed by the same FreeRTOS recursive
+mutex for all tasks entering this runtime. The platform creates it before any
+Roc entry. Acquire waits until ownership is obtained; neither callback enters
+Roc, and returning without success violates the platform contract. Generated
+platform C-ABI wrappers acquire before runtime initialization and execution,
+load register return values before releasing, and release on every normal
+return, including void and indirect results. Internal and tail calls do not
+release the mutex. Same-task nested platform entry recursively acquires it;
+platform callbacks run with the mutex held. In-process compiler evaluation and
+other targets retain their existing entry behavior. Calls that do not return
+normally require platform-level termination; cooperative shutdown does not
+unwind an interrupted Roc call. Direct internal runtime entry and glue value
+operations outside generated wrappers must also be enclosed by the platform
+in this same mutex when they access shared Roc runtime data.
+
+Shutdown is cooperative: the task returns from every Roc invocation, releases
+its owned Roc values, and calls the runtime's C-convention
+`roc_cleanup_task_state() -> void` before deletion. Each component validates its
+inactive-state invariants and releases its buffers; cleanup acquires the same
+recursive mutex, frees the task root
+and clears the platform slot. Cleanup on an empty slot does nothing. New tasks
+start with null state even when task handles are reused. Deletion during Roc
+execution and interrupt re-entry are unsupported. Shared runtime data is not
+freed by per-task cleanup. Hosted and Wasm targets retain their existing
+providers; the six-symbol common runtime ABI remains unchanged.
 
 The program's hosted catalog retains every visible hosted declaration and
 classifies its platform binding as mapped or unavailable. Only mapped entries

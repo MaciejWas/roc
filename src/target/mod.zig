@@ -876,6 +876,7 @@ pub const RocTarget = enum {
                 .riscv64 => {
                     baseline.addFeature(@backingInt(std.Target.riscv.Feature.@"64bit"));
                     baseline.addFeature(@backingInt(std.Target.riscv.Feature.i));
+                    baseline.addFeature(@backingInt(std.Target.riscv.Feature.a));
                 },
                 .wasm32 => {},
                 .arm, .other => unreachable, // cpuContract gives arm and other architectures no baseline features
@@ -1191,8 +1192,8 @@ test "every target Roc raises the CPU floor for has a v1 twin" {
     // macOS runs on, so there is nothing below it to be locked out of.
     for (std.enums.values(RocTarget)) |target| {
         if (target.cpuLevel() != .default) continue;
-        // RV64I explicitly constrains Zig's richer baseline down to the base
-        // ISA. The dedicated RV64I contract test checks its exact feature set.
+        // RV64IA explicitly constrains Zig's richer baseline to our embedded
+        // minimum. The dedicated RV64IA test checks its exact feature set.
         if (target == .riscv64elf) continue;
 
         const query = target.llvmTargetQuery();
@@ -1346,13 +1347,14 @@ test "riscv64elf target metadata" {
     try std.testing.expect(!target.isWindows());
 }
 
-test "riscv64elf CPU contract is RV64I without optional extensions" {
+test "riscv64elf CPU contract is RV64IA without other optional extensions" {
     const target = RocTarget.riscv64elf;
     const query = target.llvmTargetQuery();
     try std.testing.expectEqual(std.Target.Abi.none, query.abi.?);
     var expected = std.Target.Cpu.Feature.Set.empty;
     expected.addFeature(@backingInt(std.Target.riscv.Feature.@"64bit"));
     expected.addFeature(@backingInt(std.Target.riscv.Feature.i));
+    expected.addFeature(@backingInt(std.Target.riscv.Feature.a));
     expected.populateDependencies(std.Target.Cpu.Arch.riscv64.allFeaturesList());
     try std.testing.expect(target.llvmTargetFeatures().eql(expected));
 }

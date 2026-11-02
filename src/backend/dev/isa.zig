@@ -30,11 +30,12 @@ pub fn isaOfOrNull(target: RocTarget) ?Isa {
 /// architecture to an x64 target.
 pub const host: ?Isa = isaOfCpuArch(builtin.cpu.arch);
 
+// mwas: TODO: this is misleading. this is a "DevBackendIsa" not just "Isa"
 fn isaOfCpuArch(arch: std.Target.Cpu.Arch) ?Isa {
     return switch (roc_target.classifyCpuArch(arch)) {
         .x86_64 => .x86_64,
         .aarch64 => .aarch64,
-        .aarch64_be, .arm, .wasm32, .other => null,
+        .aarch64_be, .arm, .wasm32, .riscv64, .other => null,
     };
 }
 

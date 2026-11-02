@@ -92,6 +92,14 @@ pub const roc_dbg = "roc_dbg";
 pub const roc_expect_failed = "roc_expect_failed";
 /// Crash callback in the fixed runtime set every host defines.
 pub const roc_crashed = "roc_crashed";
+/// Native FreeRTOS platform's opaque current-task state callbacks.
+/// This is additional to runtime_set; other targets provide their own storage.
+pub const roc_get_task_state = "roc_get_task_state";
+pub const roc_set_task_state = "roc_set_task_state";
+pub const roc_cleanup_task_state = "roc_cleanup_task_state";
+pub const roc_acquire_runtime_lock = "roc_acquire_runtime_lock";
+pub const roc_release_runtime_lock = "roc_release_runtime_lock";
+pub const freestanding_runtime_set = runtime_set ++ [_][:0]const u8{ roc_get_task_state, roc_set_task_state, roc_acquire_runtime_lock, roc_release_runtime_lock };
 
 /// The fixed runtime symbols every symbol-ABI host defines, in
 /// `host_abi.extern_host` declaration order.
