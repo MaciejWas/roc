@@ -49,12 +49,12 @@ fn fail(message: []const u8) noreturn {
 
 pub export fn firmware_main() callconv(.c) noreturn {
     runtime_mutex = roc_freertos_create_mutex() orelse fail("cannot create runtime mutex");
-    if (roc_freertos_create_task(helloTask) != 1) fail("cannot create Roc task");
+    if (roc_freertos_create_task(rocTask) != 1) fail("cannot create Roc task");
     vTaskStartScheduler();
     fail("scheduler returned");
 }
 
-fn helloTask(_: ?*anyopaque) callconv(.c) void {
+fn rocTask(_: ?*anyopaque) callconv(.c) void {
     roc_main();
     roc_cleanup_task_state();
     task_finished = true;

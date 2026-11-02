@@ -24368,6 +24368,15 @@ availability, and code model. Build-time embedding, host-symbol validation, and
 code generation consume those declarations rather than maintaining their own
 architecture lists. Task-state components are indexed by an enum and each
 owner supplies its cleanup routine.
+ELF executable platform entries may declare literal `linker_script` and
+`entry_point` strings. The linker script follows the same platform-contained
+path validation and inputs_dir/<target>/ resolution as link input files, and
+is validated as a required file. Empty/NUL strings, path traversal, duplicate
+fields, and use on non-ELF or non-executable output are rejected during header
+validation. Resolved settings travel explicitly to the linker; no raw linker
+flags or script discovery are used. The platform builds its native archive,
+startup object, and script once. Ordinary `roc build` links these with the app
+into the final firmware ELF; QEMU consumes that ELF directly.
 RISC-V has no bundled default platform; a FreeRTOS platform supplies the host
 callbacks and startup. Runtime integration must not borrow another target's
 artifacts.

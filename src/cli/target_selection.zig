@@ -84,10 +84,10 @@ fn runsOnHostCpu(target: RocTarget, host_cpu_level: CpuLevel) bool {
 }
 
 fn isBuildDefaultTarget(target: RocTarget, host_cpu_level: CpuLevel) bool {
-    // Compare the architecture rather than the target, so both the default and
-    // the baseline spelling of wasm are covered. Neither spelling runs on the
-    // host CPU, so the host's CPU level does not narrow them.
-    if (target.toCpuArch() == .wasm32) return true;
+    // Freestanding platforms select their board/module explicitly. They do not
+    // execute on the host, so its OS, architecture, and CPU level do not narrow
+    // their build candidates. Platform declaration order selects among them.
+    if (target.toOsTag() == .freestanding) return true;
 
     return target.matchesHostOsAndArch() and runsOnHostCpu(target, host_cpu_level);
 }
@@ -440,7 +440,7 @@ test "a host below the default CPU level only takes native v1 targets" {
     // The whole point of detecting the host CPU: a machine that cannot execute
     // the default level's instructions must not be handed them by default.
     for (std.enums.values(RocTarget)) |target| {
-        if (target.toCpuArch() == .wasm32) continue;
+        if (target.toOsTag() == .freestanding) continue;
         if (target.cpuLevel() != .default) continue;
 
         try std.testing.expect(!isBuildDefaultTarget(target, .v1));
@@ -579,4 +579,15 @@ test "the ABI tie-break does not steal a run target from a non-exe listing" {
     const selected = try expectRequiresExecutable(selectRunTarget(config, null, .default));
     try std.testing.expectEqual(native, selected.target);
     try std.testing.expectEqual(OutputKind.shared, selected.output);
+}
+
+test "freestanding firmware is a build default but never a native run default" {
+    const config = TargetsConfig{
+        .inputs_dir = "targets",
+        .targets = &.{.{ .target = .riscv64elf, .output = .exe, .items = &.{.app} }},
+    };
+    const selected = try expectSelected(selectBuildTarget(config, null, .default));
+    try std.testing.expectEqual(RocTarget.riscv64elf, selected.target);
+    try std.testing.expectEqual(SelectionSource.default, selected.source);
+    try std.testing.expectEqual(SelectionResult.no_default, selectRunTarget(config, null, .default));
 }
