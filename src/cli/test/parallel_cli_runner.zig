@@ -18787,7 +18787,7 @@ fn customGlueZigReturnedListElements(io: std.Io, allocator: Allocator, env: *con
     }
     for ([_][]const u8{
         "pub fn deinit(self: Self, roc_host: *RocHost) void {",
-        "const prev = @atomicRmw(isize, rc, .Sub, 1, .acq_rel);",
+        "const prev = rocRefcountSub(rc);",
         "for (self.allocationItems()) |item| {",
         "ItemRelease.release(item, roc_host);",
         "if (T == RocStr) return RocStrRelease;",
@@ -18802,6 +18802,8 @@ fn customGlueZigReturnedListElements(io: std.Io, allocator: Allocator, env: *con
         \\
         \\export fn release_labels(roc_host: *abi.RocHost) void {
         \\    const labels = abi.roc_labels();
+        \\    labels.incref(1);
+        \\    labels.deinit(roc_host);
         \\    labels.deinit(roc_host);
         \\    abi.RocListWith(u8, false).empty().deinit(roc_host);
         \\}
@@ -18815,6 +18817,19 @@ fn customGlueZigReturnedListElements(io: std.Io, allocator: Allocator, env: *con
     const emit_arg = std.fmt.allocPrint(allocator, "-femit-bin={s}", .{object_path}) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate Zig release emit arg: {}", .{err});
     if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{ "zig", "build-obj", test_path, emit_arg }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    const assembly_path = std.fs.path.join(allocator, &.{ output_dir, "release_labels_rv64i.s" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate RISC-V assembly path: {}", .{err});
+    const assembly_arg = std.fmt.allocPrint(allocator, "-femit-asm={s}", .{assembly_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate assembly emit arg: {}", .{err});
+    if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{ "zig", "build-obj", test_path, "-target", "riscv64-freestanding-none", "-mcpu=generic_rv64", "-fno-emit-bin", assembly_arg }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    const assembly = std.Io.Dir.cwd().readFileAlloc(io, assembly_path, allocator, .limited(4 * 1024 * 1024)) catch |err|
+        return customInfraFailure(allocator, timer, "failed to read RISC-V assembly: {}", .{err});
+    defer allocator.free(assembly);
+    for ([_][]const u8{ "__atomic", "\tamo", "\tlr.", "\tsc." }) |forbidden| {
+        if (std.mem.find(u8, assembly, forbidden) != null) {
+            return customFailure(allocator, timer, "freestanding glue requires hardware atomics: {s}", .{forbidden});
+        }
+    }
     return null;
 }
 
@@ -18892,7 +18907,7 @@ fn customGlueRustReturnedListElements(io: std.Io, allocator: Allocator, env: *co
     }
     for ([_][]const u8{
         "pub unsafe fn release_with<P>(self, roc_host: &RocHost)",
-        "let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };",
+        "let prev = unsafe { roc_refcount_sub(rc) };",
         "for item_ref in self.allocation_items() {",
         "unsafe { P::release(item, roc_host); }",
         "size_of::<RocOwned<RocList<RocStr>, RocListRelease<RocStrRelease>>>() == core::mem::size_of::<RocList<RocStr>>()",

@@ -319,7 +319,10 @@ const Refcount = enum {
 
 const RC_TYPE: Refcount = .atomic;
 
-/// How a refcount update is performed. `atomic` is always sound; callers pass
+/// Native freestanding runtime access is serialized by the platform runtime
+/// lock, including platform-side value operations, so its updates use plain
+/// loads and stores. Other targets honor the requested atomicity.
+/// `atomic` is always sound; callers pass
 /// `single_thread` only for allocations the compiler proved no other thread
 /// can ever touch, which lets the update use plain loads and stores.
 pub const RcAtomicity = enum(u1) {
@@ -351,7 +354,7 @@ pub fn increfRcPtr(ptr_to_refcount: *isize, amount: isize, atomicity: RcAtomicit
     if (!rcConstant(refcount)) {
         // Note: we assume that a refcount will never overflow.
         // As such, we do not need to cap incrementing.
-        switch (atomicity) {
+        switch (if (comptime @import("execution_context.zig").native_freestanding) RcAtomicity.single_thread else atomicity) {
             .single_thread => {
                 ptr_to_refcount.* = refcount +% amount;
             },
@@ -627,7 +630,7 @@ inline fn decref_ptr_to_refcount(
     }
 
     if (!rcConstant(refcount)) {
-        switch (atomicity) {
+        switch (if (comptime @import("execution_context.zig").native_freestanding) RcAtomicity.single_thread else atomicity) {
             .single_thread => {
                 refcount_ptr[0] = refcount -% 1;
                 if (refcount == 1) {

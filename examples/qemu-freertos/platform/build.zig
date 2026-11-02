@@ -9,8 +9,8 @@ pub fn build(b: *std.Build) void {
         .abi = .none,
         .cpu_model = .{ .explicit = &std.Target.riscv.cpu.generic_rv64 },
         // The QEMU platform uses hardware multiply/divide and privileged CSR
-        // instructions. Roc-generated code keeps its RV64IA baseline.
-        .cpu_features_add = std.Target.riscv.featureSet(&.{ .a, .m, .zicsr }),
+        // instructions. Roc-generated code keeps its RV64I baseline.
+        .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicsr }),
     });
 
     const host = b.addLibrary(.{

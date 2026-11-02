@@ -36,7 +36,8 @@ prebuilt platform, include `main.roc`, `Uart.roc`, and `targets/`; consumers do
 not need the Zig/FreeRTOS sources or build tools.
 
 `run.sh firmware.elf` only starts QEMU with the supplied executable. It does
-not compile, link, or package anything.
+not compile, link, or package anything. It disables the CPU's atomic extension
+to exercise the platform synchronization contract.
 
 ## Implementation
 
@@ -54,9 +55,12 @@ Allocation comes from FreeRTOS's heap. One task-local slot holds Roc's opaque
 state, and a shared recursive mutex protects execution. The upstream kernel
 is C; platform policy and runtime callbacks are Zig.
 
-Firmware uses RV64IMA plus CSR instructions and LP64. The Roc code retains
-its RV64IA baseline. This platform requires hardware multiplication and
-division (`M`). Standard C declarations come from Zig's LP64 musl headers;
+Firmware uses RV64IM plus CSR instructions and LP64. The Roc code retains
+its RV64I baseline. This platform requires hardware multiplication and
+division (`M`), but does not require hardware atomics (`A`). All Roc value
+operations, including platform-side retain/release outside generated entry
+wrappers, must hold the same recursive runtime mutex. Standard C declarations
+come from Zig's LP64 musl headers;
 no libc library is linked. `-bios none` boots without Linux or OpenSBI.
 
 The example exercises one task and one hart. It does not exercise concurrent
