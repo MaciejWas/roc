@@ -1,58 +1,43 @@
 # Hello World on FreeRTOS
 
-The application is [app/main.roc](app/main.roc). It selects the platform in one
-line and uses its UART effect:
+This example builds the Roc application in [app/main.roc](app/main.roc) as a
+freestanding RISC-V firmware ELF, using the accompanying FreeRTOS platform.
 
-```roc
-app [main!] { pf: platform "../platform/main.roc" }
+The platform build downloads its pinned FreeRTOS source and produces host-library artifacts
+for the selected register width.
 
-import pf.Uart
-
-main! = || {
-    Uart.write!("Hello world\n")
-}
-```
-
-The [platform](platform/README.md) owns FreeRTOS, the Zig host, UART registers,
-allocation, locking, startup, and the memory layout. The app needs no Zig build
-file. Build the repository's compiler first with `zig build roc`.
-
-## 1. Build the platform once
+## 32-bit RISC-V on QEMU
 
 ```sh
-(cd examples/qemu-freertos/platform && zig build --prefix .)
+# From the repository root, build the Roc compiler.
+zig build roc
+
+# Build and install the RV32 FreeRTOS platform artifacts once.
+(cd examples/qemu-freertos/platform && zig build --prefix . -Driscv-bits=32)
+
+# Compile the example firmware for the platform's RV32I target.
+zig-out/bin/roc build examples/qemu-freertos/app/main.roc \
+  --target=riscv32elf \
+  --output=examples/qemu-freertos/app/hello-rv32.elf
+
+# Run the firmware with QEMU's 32-bit RISC-V system emulator.
+examples/qemu-freertos/platform/run.sh examples/qemu-freertos/app/hello-rv32.elf 32
 ```
 
-This downloads the pinned FreeRTOS source and installs the reusable archive,
-startup object, and linker script under `platform/targets/riscv64elf/`.
-Repeat only when changing the platform. It does not build an app.
-
-## 2. Build the app with Roc
+## 64-bit RISC-V on QEMU
 
 ```sh
-zig-out/bin/roc build examples/qemu-freertos/app/main.roc --output=examples/qemu-freertos/app/hello.elf
+# From the repository root, build the Roc compiler.
+zig build roc
+
+# Build and install the RV64 FreeRTOS platform artifacts once.
+(cd examples/qemu-freertos/platform && zig build --prefix . -Driscv-bits=64)
+
+# Compile the example firmware for the platform's RV64I target.
+zig-out/bin/roc build examples/qemu-freertos/app/main.roc \
+  --target=riscv64elf \
+  --output=examples/qemu-freertos/app/hello-rv64.elf
+
+# Run the firmware with QEMU's 64-bit RISC-V system emulator.
+examples/qemu-freertos/platform/run.sh examples/qemu-freertos/app/hello-rv64.elf 64
 ```
-
-Roc selects the platform's freestanding target and links the app with the
-prebuilt artifacts to produce the final firmware ELF. This command does not
-invoke Zig or rebuild FreeRTOS. Repeat it whenever the app changes.
-
-## 3. Run the firmware
-
-```sh
-examples/qemu-freertos/platform/run.sh examples/qemu-freertos/app/hello.elf
-```
-
-With `qemu-system-riscv64` on PATH, the minimal app shown above prints:
-
-```text
-Hello world
-```
-
-The task returns from Roc, cleans up, and deletes itself. The example harness
-then exits QEMU with status zero. QEMU loads the ELF directly: there is no
-separate FreeRTOS image to construct. A physical board could supply its own
-packaging/flashing script at this step.
-
-All commands above run from the repository root using its Zig version. See
-the [platform README](platform/README.md) for CPU and implementation details.
