@@ -1228,22 +1228,28 @@ fn compileStaticDataObjectBytes(
     var output = std.ArrayList(u8).empty;
     errdefer output.deinit(allocator);
 
-    ObjectWriter.generateIndexedObjectFileWithDebug(
-        allocator,
-        target,
-        &.{},
-        rodata.items,
-        zero_fill_size,
-        resolved.symbols,
-        &.{},
-        rodata_relocations.items,
-        &.{},
-        null,
-        &output,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return CompilationError.OutOfMemory,
-        error.UnsupportedTarget => return CompilationError.UnsupportedTarget,
-    };
+    if (target == .riscv32elf or target == .riscv64elf) {
+        var alignment: u32 = 1;
+        for (static_data_exports) |item| alignment = @max(alignment, item.alignment);
+        try @import("object/riscv_data.zig").emit(allocator, if (target == .riscv32elf) 32 else 64, rodata.items, zero_fill_size, alignment, resolved.symbols, rodata_relocations.items, &output);
+    } else {
+        ObjectWriter.generateIndexedObjectFileWithDebug(
+            allocator,
+            target,
+            &.{},
+            rodata.items,
+            zero_fill_size,
+            resolved.symbols,
+            &.{},
+            rodata_relocations.items,
+            &.{},
+            null,
+            &output,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return CompilationError.OutOfMemory,
+            error.UnsupportedTarget => return CompilationError.UnsupportedTarget,
+        };
+    }
 
     return .{
         .object_bytes = output.toOwnedSlice(allocator) catch return CompilationError.OutOfMemory,
@@ -1471,7 +1477,7 @@ fn composeWithCodeGen(
     var store = LirStore.init(allocator);
     defer store.deinit();
     store.setSourceFiles(files) catch return CompilationError.OutOfMemory;
-    var layouts = layout.Store.init(allocator, TargetUsize.fromPtrBitWidth(target.ptrBitWidth())) catch return CompilationError.OutOfMemory;
+    var layouts = layout.Store.init(allocator, TargetUsize.fromPtrBitWidth(if (target == .riscv32elf) 32 else 64)) catch return CompilationError.OutOfMemory;
     defer layouts.deinit();
     var static_strings = StaticStringData.build(allocator, &store, target) catch return CompilationError.OutOfMemory;
     defer static_strings.deinit();
@@ -1916,6 +1922,35 @@ test "ObjectFileCompiler runtime static-root excerpts own only reachable canonic
             try std.testing.expectEqual(text.len, output[2]);
             const value: [*]const u8 = @ptrFromInt(output[0]);
             try std.testing.expectEqualStrings(text, value[0..output[2]]);
+        }
+    }
+}
+
+test "RISC-V data objects encode target-width absolute relocations" {
+    const a = std.testing.allocator;
+    const data: [32]u8 = @splat(0);
+    const syms = [_]ObjectWriter.Symbol{
+        .{ .name = "root", .section = .rodata, .offset = 0, .size = 32, .is_global = true, .is_function = false, .is_external = false, .is_hidden = true },
+        .{ .name = "callback", .section = .undef, .offset = 0, .size = 0, .is_global = true, .is_function = true, .is_external = true },
+    };
+    const rels = [_]ObjectWriter.IndexedDataRelocation{.{ .offset = 0, .symbol = @fromBackingInt(1), .addend = 8 }};
+    for ([_]u16{ 32, 64 }) |bits| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(a);
+        try @import("object/riscv_data.zig").emit(a, bits, &data, 64, 32, &syms, &rels, &out);
+        try std.testing.expectEqualSlices(u8, "\x7fELF", out.items[0..4]);
+        try std.testing.expectEqual(@as(u8, if (bits == 32) 1 else 2), out.items[4]);
+        try std.testing.expectEqual(@as(u16, 243), std.mem.readInt(u16, out.items[18..20], .little));
+        if (bits == 32) {
+            const sh = std.mem.readInt(u32, out.items[32..36], .little);
+            const rel_off = std.mem.readInt(u32, out.items[sh + 6 * 40 + 16 ..][0..4], .little);
+            try std.testing.expectEqual(@as(u32, 0x201), std.mem.readInt(u32, out.items[rel_off + 4 ..][0..4], .little));
+            try std.testing.expectEqual(@as(i32, 8), std.mem.readInt(i32, out.items[rel_off + 8 ..][0..4], .little));
+        } else {
+            const sh = std.mem.readInt(u64, out.items[40..48], .little);
+            const rel_off = std.mem.readInt(u64, out.items[sh + 6 * 64 + 24 ..][0..8], .little);
+            try std.testing.expectEqual(@as(u64, 0x200000002), std.mem.readInt(u64, out.items[rel_off + 8 ..][0..8], .little));
+            try std.testing.expectEqual(@as(i64, 8), std.mem.readInt(i64, out.items[rel_off + 16 ..][0..8], .little));
         }
     }
 }
