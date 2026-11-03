@@ -107,7 +107,7 @@ comptime {
             // A wasm runtime's feature set is the embedder's to decide and is
             // not reportable from inside the module, so `detect` answers with
             // the level every runtime executes and nothing here constrains it.
-            .arm, .wasm32, .riscv64, .other => continue,
+            .arm, .wasm32, .riscv32, .riscv64, .other => continue,
         };
 
         if (!detected_features.eql(target.requiredRuntimeCpuFeatures())) {
@@ -182,7 +182,7 @@ fn detect() CpuLevel {
         // implements, so it gets the level every runtime executes. The
         // architectures left over have no `v1` twin, so `level` answers them
         // before reaching here.
-        .arm, .wasm32, .riscv64, .other => return .v1,
+        .arm, .wasm32, .riscv32, .riscv64, .other => return .v1,
     }
 }
 

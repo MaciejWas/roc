@@ -21,6 +21,7 @@ const store_mod = @import("../store.zig");
 const aarch64 = @import("aarch64.zig");
 const x86_64 = @import("x86_64.zig");
 const wasm = @import("wasm.zig");
+const riscv32 = @import("riscv32.zig");
 const riscv64 = @import("riscv64.zig");
 
 const Store = store_mod.Store;
@@ -153,6 +154,8 @@ pub const PhysicalCall = struct {
 /// even-register rule. X86-64 splits System V vs Windows; wasm's pointer width
 /// is reflected in the store's `targetUsize`.
 pub const Target = enum {
+    /// RISC-V ELF integer calling convention with 32-bit pointers.
+    riscv32_ilp32,
     /// RISC-V ELF integer calling convention with 64-bit pointers.
     riscv64_lp64,
     /// AAPCS64 on ELF targets.
@@ -219,7 +222,7 @@ pub fn aarch64Target(os: std.Target.Os.Tag) Target {
 fn isAarch64(target: Target) bool {
     return switch (target) {
         .aarch64, .aarch64_macho, .aarch64_windows => true,
-        .x86_64_sysv, .x86_64_windows, .wasm32, .wasm32v1, .wasm64, .riscv64_lp64 => false,
+        .x86_64_sysv, .x86_64_windows, .wasm32, .wasm32v1, .wasm64, .riscv32_ilp32, .riscv64_lp64 => false,
     };
 }
 
@@ -304,10 +307,10 @@ pub const wasm_max_function_params: u32 = 1000;
 /// argument.
 pub fn markRegisterOverflow(target: Target, lowered: LoweredCall, trailing_pointers: u32, overflow: []bool) void {
     std.debug.assert(overflow.len == lowered.args.len);
-    std.debug.assert(target != .riscv64_lp64); // fastcc groups use their normalized prototype slot budget
+    std.debug.assert(target != .riscv32_ilp32 and target != .riscv64_lp64); // fastcc groups use their normalized prototype slot budget
     @memset(overflow, false);
     switch (target) {
-        .riscv64_lp64 => unreachable, // normalized fastcc prototypes are planned by the LLVM backend
+        .riscv32_ilp32, .riscv64_lp64 => unreachable, // normalized fastcc prototypes are planned by the LLVM backend
         .x86_64_windows => {
             // Every argument, and an indirect result's pointer, takes one
             // shared position.
@@ -476,7 +479,7 @@ pub fn assignPhysicalArgs(
     var stack_size: u32 = 0;
 
     if (lowered.ret == .indirect) switch (target) {
-        .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
+        .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
         .x86_64_sysv, .x86_64_windows => {
             gp_used = 1;
             win_position = 1;
@@ -485,7 +488,7 @@ pub fn assignPhysicalArgs(
         .wasm32, .wasm32v1, .wasm64 => unreachable, // the entry assertion rejects wasm targets
     };
     if (lowered.leading_ops) switch (target) {
-        .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
+        .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
         .x86_64_windows => {
             gp_used += 1;
             win_position += 1;
@@ -503,7 +506,7 @@ pub fn assignPhysicalArgs(
         switch (placement) {
             .none => assigned.* = .none,
             .indirect => switch (target) {
-                .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
+                .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
                 .x86_64_sysv => assigned.* = .{ .stack_value = assignStackValue(
                     &stack_size,
                     size_align.size,
@@ -530,7 +533,7 @@ pub fn assignPhysicalArgs(
                 .wasm32, .wasm32v1, .wasm64 => unreachable, // the entry assertion rejects wasm targets
             },
             .registers => |registers| switch (target) {
-                .riscv64_lp64 => @panic("TODO: RISC-V native physical call assignment"),
+                .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
                 .x86_64_windows => {
                     const pieces = registers.pieces;
                     std.debug.assert(pieces.len == 1);
@@ -649,6 +652,7 @@ fn placementFor(
 
     const extend = narrowScalarExtension(store, idx);
     return switch (target) {
+        .riscv32_ilp32 => placementRiscv32(arena, store, idx, ctx),
         .riscv64_lp64 => placementRiscv64(arena, store, idx, ctx),
         .aarch64, .aarch64_macho, .aarch64_windows => placementAarch64(arena, store, target, idx, ctx, extend),
         .x86_64_sysv => placementSysV(arena, store, idx, ctx, extend),
@@ -710,7 +714,11 @@ fn integerPieces(
     carrier: RegisterCarrier,
     extend: RegExtension,
 ) std.mem.Allocator.Error!Placement {
-    const count = (size + 7) / 8;
+    return integerPiecesWithWidth(arena, size, carrier, extend, 8);
+}
+
+fn integerPiecesWithWidth(arena: std.mem.Allocator, size: u32, carrier: RegisterCarrier, extend: RegExtension, width: u32) std.mem.Allocator.Error!Placement {
+    const count = (size + width - 1) / width;
     // Only a value narrower than one register can owe a promotion, and such a
     // value is always a single piece.
     std.debug.assert(extend == .none or count == 1);
@@ -719,8 +727,8 @@ fn integerPieces(
     while (i < count) : (i += 1) {
         pieces[i] = .{
             .class = .integer,
-            .offset = @intCast(i * 8),
-            .size = @intCast(@min(8, size - i * 8)),
+            .offset = @intCast(i * width),
+            .size = @intCast(@min(width, size - i * width)),
             .extend = extend,
         };
     }
@@ -818,6 +826,82 @@ fn placementRiscv64Indirect(store: *const Store, idx: Idx, ctx: Context) Placeme
     if (store.layoutSize(store.getLayout(idx)) <= 16) base.invariant("LP64 memory classification requires a value wider than two registers", .{});
     // Like ARM, arguments pass a pointer without byval. Results use the
     // existing leading sret pointer; LP64 assigns it to a0 rather than x8.
+    return .indirect;
+}
+
+fn placementRiscv32(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    idx: Idx,
+    ctx: Context,
+) std.mem.Allocator.Error!Placement {
+    if (store.layoutSize(store.getLayout(idx)) == 0) return .none;
+    return switch (riscv32.classifyType(store, idx)) {
+        .scalar => placementRiscv32Scalar(arena, store, idx, ctx),
+        .integer => placementRiscv32Chunks(arena, store, idx, ctx, 1),
+        .double_integer => placementRiscv32Chunks(arena, store, idx, ctx, 2),
+        .memory => placementRiscv32Indirect(store, idx, ctx),
+    };
+}
+
+fn placementRiscv32Scalar(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    start: Idx,
+    ctx: Context,
+) std.mem.Allocator.Error!Placement {
+    _ = ctx; // ILP32 arguments and results use the same scalar carriers.
+    const idx = unwrapTransparentUnion(store, start);
+    const lay = store.getLayout(idx);
+    const size = store.layoutSize(lay);
+    const signedness: ?std.builtin.Signedness = switch (lay.tag) {
+        .scalar => if (lay.getScalar().tag == .int)
+            (if (idx.isSigned()) .signed else .unsigned)
+        else
+            null,
+        // classifyType established that a scalar union is a payload-free enum.
+        .tag_union => .unsigned,
+        .box, .box_of_zst, .ptr, .dynamic, .erased_callable => null,
+        .list, .list_of_zst, .struct_, .closure, .zst, .hole => unreachable, // riscv32.classifyType returns scalar only for integers, enums, and pointers
+    };
+    const extend: RegExtension = if (signedness) |sign| switch (riscv32.classifyIntegerExtension(@intCast(size * 8), sign)) {
+        .none => .none,
+        .sign_to_xlen => .sign,
+        // Unsigned narrow integers zero-extend to XLEN.
+        .zero_to_xlen => .zero,
+    } else .none;
+    return onePiece(arena, .integer, 0, @intCast(size), extend);
+}
+
+fn placementRiscv32Chunks(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    start: Idx,
+    ctx: Context,
+    chunk_count: u8,
+) std.mem.Allocator.Error!Placement {
+    _ = ctx; // ILP32 uses the same carrier for arguments and results.
+    const idx = unwrapTransparentUnion(store, start);
+    const lay = store.getLayout(idx);
+    const size_align = store.layoutSizeAlign(lay);
+    if (chunk_count != (size_align.size + 3) / 4) base.invariant("ILP32 classifier's integer chunk count must match committed size", .{});
+    // ILP32 uses an exact-sized integer for <= XLEN, i64 for an
+    // 8-byte-aligned pair, otherwise [2 x i32]. The existing array
+    // packing reads only each piece's bytes and widens a partial last piece.
+    const carrier: RegisterCarrier = if (size_align.size <= 4)
+        .piecewise
+    else if (size_align.alignment.toByteUnits() == 8)
+        .integer
+    else
+        .{ .array = null };
+    return integerPiecesWithWidth(arena, size_align.size, carrier, .none, 4);
+}
+
+fn placementRiscv32Indirect(store: *const Store, idx: Idx, ctx: Context) Placement {
+    _ = ctx; // Argument-copy pointers and sret are distinguished by the consumer.
+    if (store.layoutSize(store.getLayout(idx)) <= 8) base.invariant("ILP32 memory classification requires a value wider than two registers", .{});
+    // Like ARM, arguments pass a pointer without byval. Results use the
+    // existing leading sret pointer; ILP32 assigns it to a0 rather than x8.
     return .indirect;
 }
 
@@ -1605,4 +1689,23 @@ test "LP64 lowering: indirect results and exhaustion keep the natural LLVM signa
     try testing.expect(call.args[6].registers.carrier == .array);
     try testing.expect(call.args[7] == .indirect);
     try testing.expectEqual(RegExtension.sign, call.args[8].registers.pieces[0].extend);
+}
+
+test "riscv32 ILP32 call plans preserve widths and indirect results" {
+    var store = try Store.init(std.testing.allocator, .u32);
+    defer store.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const plan = try lower(arena.allocator(), &store, .riscv32_ilp32, &.{ .u8, .i16, .u32, .u64, .f64, .str, .u128 }, .str, false);
+    try std.testing.expectEqual(RegExtension.zero, plan.args[0].registers.pieces[0].extend);
+    try std.testing.expectEqual(RegExtension.sign, plan.args[1].registers.pieces[0].extend);
+    try std.testing.expectEqual(RegExtension.none, plan.args[2].registers.pieces[0].extend);
+    for (plan.args[3..5]) |arg| {
+        try std.testing.expectEqual(@as(usize, 2), arg.registers.pieces.len);
+        try std.testing.expectEqual(@as(u8, 4), arg.registers.pieces[0].size);
+        try std.testing.expectEqual(@as(u8, 4), arg.registers.pieces[1].size);
+    }
+    try std.testing.expect(plan.args[5] == .indirect);
+    try std.testing.expect(plan.args[6] == .indirect);
+    try std.testing.expect(plan.ret == .indirect);
 }

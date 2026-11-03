@@ -601,7 +601,7 @@ fn withoutSha256Floor(b: *std.Build, target: ResolvedTarget) ResolvedTarget {
     switch (roc_target.classifyCpuArch(target.result.cpu.arch)) {
         .x86_64 => query.cpu_features_add.removeFeature(@backingInt(std.Target.x86.Feature.sha)),
         .aarch64 => query.cpu_features_add.removeFeature(@backingInt(std.Target.aarch64.Feature.sha2)),
-        .aarch64_be, .arm, .wasm32, .riscv64, .other => return target,
+        .aarch64_be, .arm, .wasm32, .riscv32, .riscv64, .other => return target,
     }
     return b.resolveTargetQuery(query);
 }
@@ -657,7 +657,7 @@ fn addSha256Floor(query: *std.Target.Query) void {
     const arch = query.cpu_arch orelse builtin.target.cpu.arch;
     switch (roc_target.classifyCpuArch(arch)) {
         .aarch64 => query.cpu_features_add.addFeature(@backingInt(std.Target.aarch64.Feature.sha2)),
-        .x86_64, .aarch64_be, .arm, .wasm32, .riscv64, .other => {},
+        .x86_64, .aarch64_be, .arm, .wasm32, .riscv32, .riscv64, .other => {},
     }
 }
 
@@ -6182,6 +6182,7 @@ fn addMainExe(
         // WebAssembly 1.0: a wasm32v1 program links objects that use no
         // instruction-set extension.
         .{ .name = "wasm32v1", .query = roc_target.RocTarget.wasm32v1.llvmTargetQuery() },
+        .{ .name = "riscv32elf", .query = roc_target.RocTarget.riscv32elf.llvmTargetQuery() },
         .{ .name = "riscv64elf", .query = roc_target.RocTarget.riscv64elf.llvmTargetQuery() },
         .{ .name = "x64win", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc } },
         .{ .name = "x64mingw", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },
