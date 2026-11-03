@@ -1,8 +1,0 @@
-.zig-cache/
-zig-out/
-zig-pkg/
-platform/.zig-cache/
-platform/zig-out/
-platform/zig-pkg/
-platform/targets/
-app/*.elf
