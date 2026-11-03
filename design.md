@@ -448,6 +448,10 @@ explicit target, and a missing internal definition is a compiler invariant failu
 The named object-input API resolves its declared names once at its boundary;
 compiler-generated machine code uses the indexed API directly.
 
+RISC-V standalone data objects encode ELF32/R_RISCV_32 or ELF64/R_RISCV_64
+from the explicit target width and frozen symbol/relocation tables. They do
+not require a native instruction generator.
+
 A standalone readonly-data object gives its definitions global linker binding:
 the separate LLVM code object can directly reference any allocation named by a
 frozen address relocation when embedding a constant root. Private allocations
