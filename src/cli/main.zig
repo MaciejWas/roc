@@ -664,6 +664,7 @@ const EmbeddedTargetObjects = struct {
     fn forTarget(requested: RocTarget) EmbeddedTargetObjects {
         if (requested == .wasm32v1) return comptime cross(.wasm32v1, .none);
         return switch (requested.defaultCpuTarget()) {
+            .riscv32elf => comptime cross(.riscv32elf, .none),
             .riscv64elf => comptime cross(.riscv64elf, .none),
             inline .x64musl,
             .arm64musl,
@@ -5577,6 +5578,7 @@ fn defaultRunShimTarget(native: RocTarget) RocTarget {
         .x64openbsd,
         .x64netbsd,
         .x64elf,
+        .riscv32elf,
         .riscv64elf,
         .x64v1mac,
         .x64v1win,
@@ -10978,14 +10980,6 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
             },
         });
         return error.UnsupportedCrossCompilation;
-    }
-
-    if (target.toCpuArch() != .wasm32 and target.ptrBitWidth() != 64) {
-        try ctx.io.stderr().print(
-            "Error: roc build --opt={s} requires a 64-bit native host target, but {s} has {d}-bit pointers.\n",
-            .{ @tagName(args.opt), @tagName(target), target.ptrBitWidth() },
-        );
-        return error.UnsupportedTarget;
     }
 
     const target_arch = target.toCpuArch();

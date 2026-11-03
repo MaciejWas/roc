@@ -3038,7 +3038,7 @@ test "golden help: roc --help" {
         \\                                       x64win, arm64win                                        - Windows (MSVC)
         \\                                       x64mingw, arm64mingw                                    - Windows (MinGW)
         \\                                       x64freebsd, x64openbsd, x64netbsd                       - BSD
-        \\                                       x64elf, riscv64elf                                      - Freestanding ELF
+        \\                                       x64elf, riscv32elf, riscv64elf                          - Freestanding ELF
         \\                                       wasm32                                                  - WebAssembly
         \\      --no-cache                     Disable compilation and executable caches (useful for compiler and platform developers)
         \\      --no-color                     Do not use ANSI escape codes in CLI output
@@ -3081,7 +3081,7 @@ test "golden help: roc run --help" {
         \\                                   x64win, arm64win                                        - Windows (MSVC)
         \\                                   x64mingw, arm64mingw                                    - Windows (MinGW)
         \\                                   x64freebsd, x64openbsd, x64netbsd                       - BSD
-        \\                                   x64elf, riscv64elf                                      - Freestanding ELF
+        \\                                   x64elf, riscv32elf, riscv64elf                          - Freestanding ELF
         \\                                   wasm32                                                  - WebAssembly
         \\      --no-cache                 Disable compilation and executable caches (useful for compiler and platform developers)
         \\      --no-color                 Do not use ANSI escape codes in CLI output
@@ -3147,7 +3147,7 @@ test "golden help: roc build --help" {
         \\                                       x64win, arm64win                                        - Windows (MSVC)
         \\                                       x64mingw, arm64mingw                                    - Windows (MinGW)
         \\                                       x64freebsd, x64openbsd, x64netbsd                       - BSD
-        \\                                       x64elf, riscv64elf                                      - Freestanding ELF
+        \\                                       x64elf, riscv32elf, riscv64elf                          - Freestanding ELF
         \\                                       wasm32                                                  - WebAssembly
         \\      --debug                        Include debug information in the output binary
         \\      --fuzz                         Add libFuzzer no-link coverage instrumentation; final linkage must provide the runtime
