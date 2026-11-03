@@ -9,5 +9,5 @@
             .hash = "N-V-__8AANb2-ABQF22jcaKtwvDYif0JuTyWgUvqJSqd5j6g",
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "main.roc", "Uart.roc", "host.zig", "freertos_bridge.c", "FreeRTOSConfig.h", "startup.S", "linker.ld", "run.sh", "README.md" },
+    .paths = .{ "build.zig", "build.zig.zon", "main.roc", "Uart.roc", "host.zig", "freertos_bridge.c", "FreeRTOSConfig.h", "startup.S", "linker.ld", "README.md" },
 }

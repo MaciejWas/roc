@@ -21,7 +21,8 @@ zig-out/bin/roc build examples/qemu-freertos/app/main.roc \
   --output=examples/qemu-freertos/app/hello-rv32.elf
 
 # Run the firmware with QEMU's 32-bit RISC-V system emulator.
-examples/qemu-freertos/platform/run.sh examples/qemu-freertos/app/hello-rv32.elf 32
+qemu-system-riscv32 -cpu rv32,a=false,zawrs=false -machine virt -smp 1 -m 128M \
+  -nographic -bios none -kernel examples/qemu-freertos/app/hello-rv32.elf
 ```
 
 ## 64-bit RISC-V on QEMU
@@ -39,5 +40,6 @@ zig-out/bin/roc build examples/qemu-freertos/app/main.roc \
   --output=examples/qemu-freertos/app/hello-rv64.elf
 
 # Run the firmware with QEMU's 64-bit RISC-V system emulator.
-examples/qemu-freertos/platform/run.sh examples/qemu-freertos/app/hello-rv64.elf 64
+qemu-system-riscv64 -cpu rv64,a=false,zawrs=false -machine virt -smp 1 -m 128M \
+  -nographic -bios none -kernel examples/qemu-freertos/app/hello-rv64.elf
 ```

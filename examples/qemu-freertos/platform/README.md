@@ -7,19 +7,20 @@ declaration and implement its required `main! : () => {}` entry point.
 The public boundary is:
 
 - `main.roc`: requires the app entry point, exposes `Uart`, and declares how
-  `roc build` links firmware for `riscv64elf`.
+  `roc build` links firmware for `riscv32elf` and `riscv64elf`.
 - `Uart.roc`: declares `write! : Str => {}`.
 - `host.zig`: implements the hosted `roc_uart_write` symbol, runtime callbacks,
   and FreeRTOS task lifecycle. It invokes the app's exported `roc_main`.
 
 ## Building the platform
 
-From this directory, run `zig build --prefix .` to compile the Zig host and
-the pinned upstream FreeRTOS kernel.
+From this directory, run `zig build --prefix . -Driscv-bits=32` or
+`zig build --prefix . -Driscv-bits=64` to compile the Zig host and the pinned
+upstream FreeRTOS kernel.
 It installs three artifacts beside this platform declaration:
 
 ```text
-targets/riscv64elf/
+targets/riscv32elf/ or targets/riscv64elf/
 ├── startup.o
 ├── libhost.a
 └── linker.ld
@@ -35,9 +36,9 @@ source view of Roc strings comes from this repository. To distribute the
 prebuilt platform, include `main.roc`, `Uart.roc`, and `targets/`; consumers do
 not need the Zig/FreeRTOS sources or build tools.
 
-`run.sh firmware.elf` only starts QEMU with the supplied executable. It does
-not compile, link, or package anything. It disables the CPU's atomic extension
-to exercise the platform synchronization contract.
+The example's outer `run-tests.sh` builds the platform and runs every declared
+QEMU boot profile. Each profile makes its hart count and atomic-extension
+setting explicit.
 
 ## Implementation
 
@@ -63,5 +64,7 @@ wrappers, must hold the same recursive runtime mutex. Standard C declarations
 come from Zig's LP64 musl headers;
 no libc library is linked. `-bios none` boots without Linux or OpenSBI.
 
-The example exercises one task and one hart. It does not exercise concurrent
-tasks, nested entry, task recreation, or boxy execution.
+The platform starts one FreeRTOS task. In multi-hart boot profiles, only hart
+zero enters the scheduler; secondary harts park in startup. The example does
+not exercise concurrent tasks, nested entry, task recreation, SMP execution,
+or boxy execution.

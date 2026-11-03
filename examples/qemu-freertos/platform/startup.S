@@ -1,7 +1,13 @@
 .section .text.start
 .global _start
 _start:
-    /* The example runs exactly one hart and starts directly in machine mode. */
+    /*
+     * FreeRTOS in this platform is single-hart. On a multi-hart machine only
+     * hart zero may initialize RAM and enter the scheduler; every secondary
+     * hart remains parked until a platform with SMP support takes ownership.
+     */
+    csrr t0, mhartid
+    bnez t0, 3f
     csrw mie, zero
     .option push
     .option norelax
