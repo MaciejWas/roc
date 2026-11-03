@@ -203,13 +203,14 @@ fn getLlvmTriple(target: std.Target) []const u8 {
             .freestanding, .wiiu, .@"switch", .gba, .psx, .tios, .ashetos, .other, .contiki, .fuchsia, .hermit, .managarm, .haiku, .hurd, .illumos, .linux, .plan9, .rtems, .serenity, .dragonfly, .freebsd, .netbsd, .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .windows, .uefi, .@"3ds", .ps3, .ps4, .ps5, .psp, .vita, .emscripten, .amdhsa, .amdpal, .cuda, .mesa3d, .nvcl, .opencl, .opengl, .vulkan => "wasm64-unknown-unknown",
         };
     }
-    if (arch == .riscv32) return "riscv32-unknown-unknown";
+    if (arch == .riscv32) return "riscv32-unknown-none-elf";
     if (arch == .riscv64) return "riscv64-unknown-none-elf";
     return "unknown-unknown-unknown";
 }
 
 fn getLlvmDataLayout(target: std.Target) []const u8 {
     if (target.cpu.arch == .wasm32) return "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20";
+    if (target.cpu.arch == .riscv32 and target.os.tag == .freestanding) return "e-m:e-p:32:32-i64:64-n32-S128";
     if (target.cpu.arch == .riscv64 and target.os.tag == .freestanding) return "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128";
     if (target.cpu.arch == .x86_64) {
         return switch (target.os.tag) {
@@ -1953,7 +1954,7 @@ pub const MonoLlvmCodeGen = struct {
     }
 
     fn usesRiscvTailPrototype(self: *const MonoLlvmCodeGen, proc: LirProcSpec) bool {
-        return self.target.cpu.arch == .riscv64 and proc.tail_group != null;
+        return (self.target.cpu.arch == .riscv32 or self.target.cpu.arch == .riscv64) and proc.tail_group != null;
     }
 
     fn lowerFastCall(self: *MonoLlvmCodeGen, arena: std.mem.Allocator, proc: LirProcSpec, args: []const layout.Idx) Error!layout.abi.LoweredCall {
@@ -1966,7 +1967,7 @@ pub const MonoLlvmCodeGen = struct {
                 const pieces = try arena.dupe(layout.abi.RegPiece, arg.registers.pieces);
                 for (pieces) |*piece| {
                     piece.llvm_float = null;
-                    piece.llvm_integer_bits = 64;
+                    piece.llvm_integer_bits = self.target.ptrBitWidth();
                     piece.extend = .none;
                 }
                 arg.* = .{ .registers = .{ .pieces = pieces } };
@@ -2431,7 +2432,7 @@ pub const MonoLlvmCodeGen = struct {
     /// spill reload placed between that call and the caller's stack
     /// readjustment from the stack pointer before the pop (#12191).
     fn fastCallConv(self: *const MonoLlvmCodeGen, proc: LirProcSpec) LlvmBuilder.CallConv {
-        if (self.target.cpu.arch.isWasm() or self.target.cpu.arch == .riscv64 or proc.tail_group == null) return .fastcc;
+        if (self.target.cpu.arch.isWasm() or (self.target.cpu.arch == .riscv32 or self.target.cpu.arch == .riscv64) or proc.tail_group == null) return .fastcc;
         return .tailcc;
     }
 
@@ -2590,8 +2591,8 @@ pub const MonoLlvmCodeGen = struct {
     /// stored tail-group arguments copy out of the caller's memory.
     fn appendFastPadding(self: *MonoLlvmCodeGen, sig: *const FastSignature, types: *std.ArrayList(LlvmBuilder.Type), values: ?*std.ArrayList(LlvmBuilder.Value)) Error!void {
         for (0..sig.padding_count) |_| {
-            try types.append(self.allocator, .i64);
-            if (values) |args| try args.append(self.allocator, try self.intValue(.i64, 0));
+            try types.append(self.allocator, self.ptrSizedIntType());
+            if (values) |args| try args.append(self.allocator, try self.intValue(self.ptrSizedIntType(), 0));
         }
     }
 
@@ -13773,6 +13774,7 @@ pub const MonoLlvmCodeGen = struct {
     /// The C-ABI target this build is compiling for.
     fn abiTarget(self: *const MonoLlvmCodeGen) layout.abi.Target {
         const arch = self.target.cpu.arch;
+        if (arch == .riscv32) return .riscv32_ilp32;
         if (arch == .riscv64) return .riscv64_lp64;
         if (arch == .aarch64 or arch == .aarch64_be) {
             return layout.abi.aarch64Target(self.target.os.tag);
@@ -13911,7 +13913,7 @@ pub const MonoLlvmCodeGen = struct {
     }
 
     fn addCAbiReturnAttrs(self: *MonoLlvmCodeGen, builder: *LlvmBuilder, attrs: *LlvmBuilder.FunctionAttributes.Wip, registers: layout.abi.RegisterPlacement) Error!void {
-        if (self.target.cpu.arch != .riscv64 or registers.carrier != .piecewise or registers.pieces.len != 1) return;
+        if ((self.target.cpu.arch != .riscv32 and self.target.cpu.arch != .riscv64) or registers.carrier != .piecewise or registers.pieces.len != 1) return;
         switch (registers.pieces[0].extend) {
             .none => {},
             .zero => try attrs.addReturnAttr(.zeroext, builder),
@@ -13928,7 +13930,7 @@ pub const MonoLlvmCodeGen = struct {
     ) Error!void {
         switch (registers.carrier) {
             .piecewise => for (registers.pieces) |piece| {
-                if (self.target.cpu.arch == .riscv64) switch (piece.extend) {
+                if (self.target.cpu.arch == .riscv32 or self.target.cpu.arch == .riscv64) switch (piece.extend) {
                     .none => {},
                     .zero => try attrs.addParamAttr(param_types.items.len, .zeroext, builder),
                     .sign => try attrs.addParamAttr(param_types.items.len, .signext, builder),
@@ -15786,7 +15788,7 @@ test "LP64 LLVM carriers reuse ARM exact-byte packing and bitcast software float
     for (&fields, 0..) |*field, i| field.* = .{ .index = @intCast(i), .layout = .u8 };
     const nine = try layouts.putStructFields(&fields);
 
-    var codegen = MonoLlvmCodeGen.init(allocator, &store, &.{}, &.{}, &.{});
+    var codegen = MonoLlvmCodeGen.init(allocator, &store);
     defer codegen.deinit();
     codegen.layout_store = &layouts;
     var builder = try codegen.createBuilder("lp64_carrier_roundtrips");
@@ -15839,10 +15841,15 @@ test "LP64 LLVM carriers reuse ARM exact-byte packing and bitcast software float
 }
 
 fn testRiscvPaddedTailGroup(arities: [2]usize, param_layout: layout.Idx, ret_layout: layout.Idx) !void {
+    try testRiscvPaddedTailGroupForTarget(arities, param_layout, ret_layout, .riscv32elf);
+    try testRiscvPaddedTailGroupForTarget(arities, param_layout, ret_layout, .riscv64elf);
+}
+
+fn testRiscvPaddedTailGroupForTarget(arities: [2]usize, param_layout: layout.Idx, ret_layout: layout.Idx, target_name: roc_target.RocTarget) !void {
     const allocator = std.testing.allocator;
     var store = lir.LirStore.init(allocator);
     defer store.deinit();
-    var layouts = try layout.Store.init(allocator, .u64);
+    var layouts = try layout.Store.init(allocator, if (target_name.ptrBitWidth() == 32) .u32 else .u64);
     defer layouts.deinit();
     var proc_ids: [2]LirProcSpecId = undefined;
     var params: [2][]LocalId = undefined;
@@ -15875,8 +15882,8 @@ fn testRiscvPaddedTailGroup(arities: [2]usize, param_layout: layout.Idx, ret_lay
         } }, .test_fixture);
         store.getProcSpecPtr(proc_ids[i]).body = body;
     }
-    const target = try std.zig.system.resolveTargetQuery(std.testing.io, roc_target.RocTarget.riscv64elf.llvmTargetQuery());
-    var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, &.{}, &.{}, &.{}, target);
+    const target = try std.zig.system.resolveTargetQuery(std.testing.io, target_name.llvmTargetQuery());
+    var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, target);
     defer codegen.deinit();
     codegen.layout_store = &layouts;
     var builder = try codegen.createBuilder("riscv_padded_tail_group");
@@ -15943,10 +15950,9 @@ test "RISC-V LP64 platform wrappers preserve C signatures and extension attribut
         }, .none);
     }
     const target = try std.zig.system.resolveTargetQuery(std.testing.io, roc_target.RocTarget.riscv64elf.llvmTargetQuery());
-    var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, &.{}, &.{}, &.{}, target);
+    var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, target);
     defer codegen.deinit();
     codegen.layout_store = &layouts;
-    codegen.boxy_runtime_used = true;
     var builder = try codegen.createBuilder("riscv_c_abi_wrappers");
     defer builder.deinit();
     codegen.builder = &builder;
@@ -15962,10 +15968,9 @@ test "RISC-V LP64 platform wrappers preserve C signatures and extension attribut
     for (names) |name| {
         const wrapper_ir = printedFunction(ir.written(), name) orelse return error.TestUnexpectedResult;
         const acquire = std.mem.find(u8, wrapper_ir, "call void @roc_acquire_runtime_lock()") orelse return error.TestUnexpectedResult;
-        const init = std.mem.find(u8, wrapper_ir, "call void @roc_boxy_init_embedded(") orelse return error.TestUnexpectedResult;
         const release = std.mem.find(u8, wrapper_ir, "call void @roc_release_runtime_lock()") orelse return error.TestUnexpectedResult;
         const ret = std.mem.find(u8, wrapper_ir[release..], "ret ") orelse return error.TestUnexpectedResult;
-        try std.testing.expect(acquire < init and init < release and ret > 0);
+        try std.testing.expect(acquire < release and ret > 0);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wrapper_ir, "call void @roc_acquire_runtime_lock()"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wrapper_ir, "call void @roc_release_runtime_lock()"));
         // Once another task can enter, only the already materialized return
@@ -16000,7 +16005,7 @@ test "platform runtime lock excludes hosted, Wasm, and compiler evaluation" {
     const targets = [_]roc_target.RocTarget{ .x64musl, .arm64musl, .wasm32v1, .riscv64elf };
     for (targets) |target_name| {
         const target = try std.zig.system.resolveTargetQuery(std.testing.io, target_name.llvmTargetQuery());
-        var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, &.{}, &.{}, &.{}, target);
+        var codegen = MonoLlvmCodeGen.initForLinkedObject(allocator, &store, target);
         defer codegen.deinit();
         codegen.layout_store = &layouts;
         if (target_name == .riscv64elf) codegen.program_kind = .in_process;

@@ -19,7 +19,7 @@ pub fn runtimeAbiForTarget(arch: std.Target.Cpu.Arch, os: std.Target.Os.Tag) Run
 }
 
 /// CPU architecture categories used by Roc's target-selection logic.
-pub const CpuArchClass = enum { x86_64, aarch64, aarch64_be, arm, wasm32, riscv64, other };
+pub const CpuArchClass = enum { x86_64, aarch64, aarch64_be, arm, wasm32, riscv32, riscv64, other };
 
 /// Classifies a Zig CPU architecture into the categories Roc distinguishes.
 pub fn classifyCpuArch(arch: std.Target.Cpu.Arch) CpuArchClass {
@@ -29,6 +29,7 @@ pub fn classifyCpuArch(arch: std.Target.Cpu.Arch) CpuArchClass {
         .aarch64_be => .aarch64_be,
         .arm => .arm,
         .wasm32 => .wasm32,
+        .riscv32 => .riscv32,
         .riscv64 => .riscv64,
         .alpha,
         .amdgcn,
@@ -65,7 +66,6 @@ pub fn classifyCpuArch(arch: std.Target.Cpu.Arch) CpuArchClass {
         .powerpc64,
         .powerpc64le,
         .propeller,
-        .riscv32,
         .riscv32be,
         .riscv64be,
         .s390x,
@@ -219,7 +219,7 @@ pub fn machoArchName(arch: std.Target.Cpu.Arch) MachoArchError![]const u8 {
     return switch (classifyCpuArch(arch)) {
         .aarch64 => "arm64",
         .x86_64 => "x86_64",
-        .aarch64_be, .arm, .wasm32, .riscv64, .other => error.UnsupportedMachoArch,
+        .aarch64_be, .arm, .wasm32, .riscv32, .riscv64, .other => error.UnsupportedMachoArch,
     };
 }
 
@@ -250,7 +250,7 @@ pub fn glibcProgramInterpreter(arch: std.Target.Cpu.Arch) ?[]const u8 {
         .x86_64 => "/lib64/" ++ ld_so.glibc_x86_64,
         .aarch64 => "/lib/" ++ ld_so.glibc_aarch64,
         .arm => "/lib/" ++ ld_so.glibc_arm,
-        .aarch64_be, .wasm32, .riscv64, .other => null,
+        .aarch64_be, .wasm32, .riscv32, .riscv64, .other => null,
     };
 }
 
@@ -477,6 +477,7 @@ pub const RocTarget = enum {
     arm32musl,
 
     // Embedded RISC-V, without an OS or libc.
+    riscv32elf,
     riscv64elf,
 
     // WebAssembly
@@ -568,6 +569,7 @@ pub const RocTarget = enum {
                     .macos, .windows, .freebsd, .openbsd, .netbsd, .other => return .arm32linux, // Generic ARM32 Linux
                 }
             },
+            .riscv32 => return .riscv32elf,
             .riscv64 => return .riscv64elf,
             .wasm32 => return .wasm32,
             .other => {
@@ -647,6 +649,7 @@ pub const RocTarget = enum {
             .arm64glibc,
             .arm32linux,
             .arm32musl,
+            .riscv32elf,
             .riscv64elf,
             .wasm32,
             => self,
@@ -700,7 +703,7 @@ pub const RocTarget = enum {
             .wasm32v1,
             => self,
 
-            .arm64mac, .arm32linux, .arm32musl, .riscv64elf => null,
+            .arm64mac, .arm32linux, .arm32musl, .riscv32elf, .riscv64elf => null,
         };
     }
 
@@ -720,7 +723,7 @@ pub const RocTarget = enum {
 
     pub fn supportsLlvm(self: RocTarget) bool {
         return switch (classifyCpuArch(self.toCpuArch())) {
-            .x86_64, .aarch64, .wasm32, .riscv64 => true,
+            .x86_64, .aarch64, .wasm32, .riscv32, .riscv64 => true,
             .aarch64_be, .arm, .other => false,
         };
     }
@@ -728,7 +731,7 @@ pub const RocTarget = enum {
     /// RISC-V medany permits firmware anywhere in a single 2 GiB window.
     pub fn llvmCodeModel(self: RocTarget) std.builtin.CodeModel {
         return switch (classifyCpuArch(self.toCpuArch())) {
-            .riscv64 => .medium,
+            .riscv32, .riscv64 => .medium,
             .x86_64, .aarch64, .aarch64_be, .arm, .wasm32, .other => .default,
         };
     }
@@ -776,7 +779,7 @@ pub const RocTarget = enum {
             .arm64v1glibc,
             => self.defaultCpuTarget(),
 
-            .arm32linux, .arm32musl, .wasm32, .wasm32v1, .riscv64elf => null,
+            .arm32linux, .arm32musl, .wasm32, .wasm32v1, .riscv32elf, .riscv64elf => null,
         };
     }
 
@@ -813,7 +816,7 @@ pub const RocTarget = enum {
             .arm64v1musl,
             .arm32musl,
             => .linux_static,
-            .x64elf, .x64v1elf, .riscv64elf => .elf,
+            .x64elf, .x64v1elf, .riscv32elf, .riscv64elf => .elf,
             .wasm32, .wasm32v1 => .wasm,
         };
     }
@@ -828,7 +831,7 @@ pub const RocTarget = enum {
             .x64netbsd, .x64v1netbsd => .netbsd,
             .x64musl, .x64glibc, .x64linux, .x64elf, .arm64musl, .arm64glibc, .arm64linux, .arm32musl, .arm32linux => .linux,
             .x64v1musl, .x64v1glibc, .x64v1linux, .x64v1elf, .arm64v1musl, .arm64v1glibc, .arm64v1linux => .linux,
-            .wasm32, .wasm32v1, .riscv64elf => .freestanding,
+            .wasm32, .wasm32v1, .riscv32elf, .riscv64elf => .freestanding,
         };
     }
 
@@ -846,6 +849,7 @@ pub const RocTarget = enum {
             // arm32 targets
             .arm32linux, .arm32musl => .arm,
 
+            .riscv32elf => .riscv32,
             .riscv64elf => .riscv64,
 
             // WebAssembly
@@ -885,6 +889,10 @@ pub const RocTarget = enum {
                 }
             else
                 .{},
+            .riscv32 => .{
+                .codegen_model = .{ .explicit = &std.Target.riscv.cpu.generic_rv32 },
+                .architecture_baseline_features = .empty,
+            },
             .riscv64 => .{
                 .codegen_model = .{ .explicit = &std.Target.riscv.cpu.generic_rv64 },
                 .architecture_baseline_features = .empty,
@@ -914,6 +922,10 @@ pub const RocTarget = enum {
                 // Advanced SIMD and floating point are mandatory in the
                 // application profile Roc targets at Armv8.0-A.
                 .aarch64, .aarch64_be => baseline.addFeature(@backingInt(std.Target.aarch64.Feature.neon)),
+                .riscv32 => {
+                    baseline.addFeature(@backingInt(std.Target.riscv.Feature.@"32bit"));
+                    baseline.addFeature(@backingInt(std.Target.riscv.Feature.i));
+                },
                 .riscv64 => {
                     baseline.addFeature(@backingInt(std.Target.riscv.Feature.@"64bit"));
                     baseline.addFeature(@backingInt(std.Target.riscv.Feature.i));
@@ -961,7 +973,7 @@ pub const RocTarget = enum {
                 }
             },
             .wasm32 => contract.instruction_features.addFeature(@backingInt(std.Target.wasm.Feature.simd128)),
-            .arm, .riscv64, .other => {},
+            .arm, .riscv32, .riscv64, .other => {},
         }
 
         return contract;
@@ -1026,6 +1038,7 @@ pub const RocTarget = enum {
             .arm32linux => "arm-unknown-linux-gnueabihf",
             .arm32musl => "arm-unknown-linux-musleabihf",
 
+            .riscv32elf => "riscv32-unknown-none-elf",
             .riscv64elf => "riscv64-unknown-none-elf",
 
             // WebAssembly
@@ -1069,7 +1082,7 @@ pub const RocTarget = enum {
     pub fn ptrBitWidth(self: RocTarget) u16 {
         return switch (classifyCpuArch(self.toCpuArch())) {
             .x86_64, .aarch64, .aarch64_be, .riscv64 => 64,
-            .arm, .wasm32 => 32,
+            .arm, .wasm32, .riscv32 => 32,
             .other => 64, // Default to 64-bit
         };
     }
@@ -1234,7 +1247,7 @@ test "every target Roc raises the CPU floor for has a v1 twin" {
         if (target.cpuLevel() != .default) continue;
         // RV64I explicitly constrains Zig's richer baseline to our embedded
         // minimum. The dedicated RV64I test checks its exact feature set.
-        if (target == .riscv64elf) continue;
+        if (target == .riscv32elf or target == .riscv64elf) continue;
 
         const query = target.llvmTargetQuery();
         const names_model = switch (query.cpu_model) {
@@ -1333,7 +1346,7 @@ test "the roster names every default-level target once, under its family" {
         "  x64win, arm64win                                        - Windows (MSVC)",
         "  x64mingw, arm64mingw                                    - Windows (MinGW)",
         "  x64freebsd, x64openbsd, x64netbsd                       - BSD",
-        "  x64elf, riscv64elf                                      - Freestanding ELF",
+        "  x64elf, riscv32elf, riscv64elf                          - Freestanding ELF",
         "  wasm32                                                  - WebAssembly",
     };
     for (expected, RocTarget.roster) |expected_line, line| {
@@ -1400,7 +1413,7 @@ test "riscv64elf CPU contract is RV64I without optional extensions" {
 
 test "LLVM runtime policy is explicit for every Roc target" {
     for (std.enums.values(RocTarget)) |target| {
-        if (target == .riscv64elf) {
+        if (target == .riscv32elf or target == .riscv64elf) {
             try std.testing.expect(target.supportsLlvm());
             try std.testing.expectEqual(RuntimeAbi.task_local, target.runtimeAbi());
             try std.testing.expectEqual(target, target.llvmBuiltinRuntimeTarget().?);
@@ -1411,4 +1424,15 @@ test "LLVM runtime policy is explicit for every Roc target" {
             try std.testing.expectEqual(std.builtin.CodeModel.default, target.llvmCodeModel());
         }
     }
+}
+
+test "riscv32elf metadata and RV32I CPU contract" {
+    const target = RocTarget.fromString("riscv32elf").?;
+    try std.testing.expectEqual(std.Target.Cpu.Arch.riscv32, target.toCpuArch());
+    try std.testing.expectEqualStrings("riscv32-unknown-none-elf", target.toTriple());
+    try std.testing.expectEqual(@as(u16, 32), target.ptrBitWidth());
+    try std.testing.expectEqual(std.Target.Os.Tag.freestanding, target.toOsTag());
+    var expected = std.Target.riscv.featureSet(&.{ .@"32bit", .i });
+    expected.populateDependencies(std.Target.Cpu.Arch.riscv32.allFeaturesList());
+    try std.testing.expect(target.llvmTargetFeatures().eql(expected));
 }

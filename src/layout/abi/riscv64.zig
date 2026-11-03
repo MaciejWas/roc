@@ -109,7 +109,7 @@ test "riscv64 LP64: scalars and pointers" {
     const pointers = [_]layout.Idx{
         try store.insertBox(.u64),
         try store.insertBox(.zst),
-        try store.insertErasedBox(),
+        try store.dynamicLayout(),
         try store.insertPtr(.u8),
         try store.insertErasedCallable(),
     };

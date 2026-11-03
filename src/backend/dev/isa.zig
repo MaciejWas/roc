@@ -35,7 +35,7 @@ fn isaOfCpuArch(arch: std.Target.Cpu.Arch) ?Isa {
     return switch (roc_target.classifyCpuArch(arch)) {
         .x86_64 => .x86_64,
         .aarch64 => .aarch64,
-        .aarch64_be, .arm, .wasm32, .riscv64, .other => null,
+        .aarch64_be, .arm, .wasm32, .riscv32, .riscv64, .other => null,
     };
 }
 

@@ -12,8 +12,13 @@ _start:
     la t1, __bss_end
 1:
     bgeu t0, t1, 2f
+#if __riscv_xlen == 32
+    sw zero, 0(t0)
+    addi t0, t0, 4
+#else
     sd zero, 0(t0)
     addi t0, t0, 8
+#endif
     j 1b
 2:
     la t0, freertos_risc_v_trap_handler

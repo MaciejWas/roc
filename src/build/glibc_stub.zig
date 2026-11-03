@@ -11,7 +11,7 @@ pub fn generateComprehensiveStub(
     const arch_class = target_mod.classifyCpuArch(target_arch);
     const ptr_width: u32 = switch (arch_class) {
         .x86_64, .aarch64, .riscv64 => 8,
-        .aarch64_be, .arm, .wasm32, .other => 4,
+        .aarch64_be, .arm, .wasm32, .riscv32, .other => 4,
     };
 
     try writer.writeAll(".text\n");
@@ -21,7 +21,7 @@ pub fn generateComprehensiveStub(
     switch (arch_class) {
         .x86_64 => try writer.writeAll("    xor %rax, %rax\n    ret\n\n"),
         .aarch64 => try writer.writeAll("    mov x0, #0\n    ret\n\n"),
-        .riscv64 => return error.UnsupportedTarget,
+        .riscv32, .riscv64 => return error.UnsupportedTarget,
         .aarch64_be, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
     }
 
@@ -91,7 +91,7 @@ pub fn generateComprehensiveStub(
             switch (arch_class) {
                 .x86_64 => try writer.writeAll("    mov $1, %rdi\n    mov $60, %rax\n    syscall\n\n"),
                 .aarch64 => try writer.writeAll("    mov x0, #1\n    mov x8, #93\n    svc #0\n\n"),
-                .riscv64 => return error.UnsupportedTarget,
+                .riscv32, .riscv64 => return error.UnsupportedTarget,
                 .aarch64_be, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
             }
         } else {
@@ -99,7 +99,7 @@ pub fn generateComprehensiveStub(
             switch (arch_class) {
                 .x86_64 => try writer.writeAll("    xor %rax, %rax\n    ret\n\n"),
                 .aarch64 => try writer.writeAll("    mov x0, #0\n    ret\n\n"),
-                .riscv64 => return error.UnsupportedTarget,
+                .riscv32, .riscv64 => return error.UnsupportedTarget,
                 .aarch64_be, .arm, .wasm32, .other => try writer.writeAll("    ret\n\n"),
             }
         }
