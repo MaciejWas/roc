@@ -1142,7 +1142,7 @@ fn createUnsupportedDefaultPlatformTargetReport(allocator: Allocator, info: anyt
             "Use an app with an OpenBSD platform and build it natively on OpenBSD.",
         .platform_required => "This embedded target requires a platform that supplies startup code, allocation, " ++
             "task-local storage, and the recursive runtime lock. Use an app that declares such a platform, " ++
-            "as in examples/qemu-freertos/app/main.roc.",
+            "as in the FreeRTOS examples in the separate roc-embedded repository.",
     });
 
     return report;
