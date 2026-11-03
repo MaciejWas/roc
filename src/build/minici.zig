@@ -436,7 +436,7 @@ fn setSelectionOnly(selection: *Selection, value: []const u8, arg: []const u8) !
 fn requireSha256Hardware() void {
     const supported = switch (target.classifyCpuArch(builtin.cpu.arch)) {
         .aarch64 => aarch64HasSha2(),
-        .x86_64, .aarch64_be, .arm, .wasm32, .other => true,
+        .x86_64, .aarch64_be, .arm, .wasm32, .riscv32, .riscv64, .other => true,
     };
     if (supported) return;
     std.debug.print(
