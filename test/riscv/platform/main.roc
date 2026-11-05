@@ -1,9 +1,9 @@
 platform ""
     requires { main! : () => {} }
-    exposes [Uart]
+    exposes [Uart, Host]
     packages {}
     provides { "roc_main": main_for_host!, "roc_f32": id_f32, "roc_f64": id_f64, "roc_pair": id_pair, "roc_mixed": id_mixed, "roc_overflow": overflow, "roc_sum14": sum14 }
-    hosted { "roc_uart_write": Uart.write!, "roc_host_pair": Host.pair!, "roc_host_mixed": Host.mixed! }
+    hosted { "roc_host_number": Host.number!, "roc_uart_write": Uart.write!, "roc_host_pair": Host.pair!, "roc_host_mixed": Host.mixed! }
     targets: {
         riscv32elf: { inputs: ["startup.o", app, "libhost.a"], output: Exe, linker_script: "linker.ld", entry_point: "_start" },
         riscv64elf: { inputs: ["startup.o", app, "libhost.a"], output: Exe, linker_script: "linker.ld", entry_point: "_start" },
