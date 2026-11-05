@@ -24574,6 +24574,12 @@ ABI and code model, including compiler-rt. Compiler support is private to the
 resulting object. Source platform identity covers these literal settings; the
 object emission identity also contains their canonical representation. No
 RISC-V platform object or runtime payload may be borrowed from another target.
+The RV64 private runtime owns addition-and-shift multiplication and binary
+long division primitives (`__muldi3`, `__udivdi3`, `__umoddi3`, `__udivmoddi4`).
+Their bodies must not contain arithmetic that RV64I legalizes back to those
+same helpers. The payload exports the bodies with `roc__riscv_` names, and
+composition binds the canonical aliases before internalization. Wider and
+signed software arithmetic can call these native-word primitives.
 
 `output: Exe` links firmware using the platform's startup inputs, entry point,
 and linker script. `output: Archive` packages Roc's app and its compiler-owned

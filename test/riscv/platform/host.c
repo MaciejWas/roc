@@ -45,6 +45,7 @@ typedef struct { double x, y; } Pair;
 typedef struct { float f; int i; } Mixed;
 Pair roc_host_pair(Pair value) { if (!depth) finish(0); return value; }
 Mixed roc_host_mixed(Mixed value) { if (!depth) finish(0); return value; }
+u64 roc_host_number(void) { if (!depth) finish(0); return 12345; }
 extern void roc_main(void);
 extern float roc_f32(float);
 extern double roc_f64(double);

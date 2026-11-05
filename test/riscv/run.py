@@ -90,7 +90,7 @@ def main():
                     cpu = f"rv{bits}" if "a" in extensions else f"rv{bits},a=false,zawrs=false"
                     text = run([f"qemu-system-riscv{bits}", "-machine", "virt", "-cpu", cpu,
                                 "-nographic", "-bios", "none", "-kernel", firmware], root, 15)
-                    assert text == "riscv platform 8 passed\n", repr(text)
+                    assert text == "riscv platform 12345 passed\n", repr(text)
                     count += 1
                     print(f"PASS {isa}/{abi} specialize={specialized} output={output}", flush=True)
     assert count, "no matching ISA profiles"
