@@ -50,6 +50,7 @@ extern float roc_f32(float);
 extern double roc_f64(double);
 extern Pair roc_pair(Pair);
 extern Mixed roc_mixed(Mixed);
+extern double roc_sum14(double,double,double,double,double,double,double,double,double,double,double,double,double,double);
 extern Mixed roc_overflow(float,float,float,float,float,float,float,float,float,Mixed);
 static u32 float_bits(float f) { union { float f; u32 u; } v = { .f = f }; return v.u; }
 static u64 double_bits(double f) { union { double f; u64 u; } v = { .f = f }; return v.u; }
@@ -62,6 +63,7 @@ void firmware_main(void) {
     if (float_bits(mixed.f) != 0x3fa00000 || mixed.i != 7) finish(0);
     mixed = roc_overflow(1,2,3,4,5,6,7,8,9,(Mixed){1.25f, 7});
     if (float_bits(mixed.f) != 0x3fa00000 || mixed.i != 7) finish(0);
+    if (double_bits(roc_sum14(1,2,3,4,5,6,7,8,9,10,11,12,13,14)) != 0x405a400000000000ULL) finish(0);
     roc_main();
     finish(depth == 0);
 }
