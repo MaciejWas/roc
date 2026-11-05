@@ -2,7 +2,7 @@ platform ""
     requires { main! : () => {} }
     exposes [Uart]
     packages {}
-    provides { "roc_main": main_for_host!, "roc_f32": id_f32, "roc_f64": id_f64, "roc_pair": id_pair, "roc_mixed": id_mixed, "roc_overflow": overflow }
+    provides { "roc_main": main_for_host!, "roc_f32": id_f32, "roc_f64": id_f64, "roc_pair": id_pair, "roc_mixed": id_mixed, "roc_overflow": overflow, "roc_sum14": sum14 }
     hosted { "roc_uart_write": Uart.write!, "roc_host_pair": Host.pair!, "roc_host_mixed": Host.mixed! }
     targets: {
         riscv32elf: { inputs: ["startup.o", app, "libhost.a"], output: Exe, linker_script: "linker.ld", entry_point: "_start" },
@@ -36,3 +36,7 @@ id_mixed = |value| value
 
 overflow : F32, F32, F32, F32, F32, F32, F32, F32, F32, { f : F32, i : I32 } -> { f : F32, i : I32 }
 overflow = |_a, _b, _c, _d, _e, _f, _g, _h, _i, value| value
+
+# Exercise ordinary internal calls beyond the XLEN argument-slot budget.
+sum14 : F64, F64, F64, F64, F64, F64, F64, F64, F64, F64, F64, F64, F64, F64 -> F64
+sum14 = |a, b, c, d, e, f, g, h, i, j, k, l, m, n| a + b + c + d + e + f + g + h + i + j + k + l + m + n

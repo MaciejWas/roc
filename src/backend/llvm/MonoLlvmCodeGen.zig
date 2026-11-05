@@ -2012,8 +2012,10 @@ pub const MonoLlvmCodeGen = struct {
     }
 
     fn lowerFastCall(self: *MonoLlvmCodeGen, arena: std.mem.Allocator, proc: LirProcSpec, args: []const layout.Idx) Error!layout.abi.LoweredCall {
-        var lowered = try layout.abi.lower(arena, self.layouts(), self.abiTarget(), args, fastRetLayout(proc), false);
-        if (self.usesRiscvTailPrototype(proc)) {
+        const riscv = self.target.cpu.arch == .riscv32 or self.target.cpu.arch == .riscv64;
+        const abi_target = if (riscv) cAbiTargetFor(self.target) else self.abiTarget();
+        var lowered = try layout.abi.lower(arena, self.layouts(), abi_target, args, fastRetLayout(proc), false);
+        if (riscv) {
             const normalized = try arena.dupe(layout.abi.Placement, lowered.args);
             lowered.args = normalized;
             for (normalized) |*arg| {
@@ -2117,22 +2119,13 @@ pub const MonoLlvmCodeGen = struct {
             if (std.mem.findScalar(bool, stored, true) != null) {
                 layout.abi.markRegisterOverflow(self.abiTarget(), lowered, trailing_pointers + 1, stored);
             }
-        } else if (proc.tail_group != null) {
-            if (self.usesRiscvTailPrototype(proc)) {
-                var used: u32 = @intFromBool(lowered.ret == .indirect) + trailing_pointers + @intFromBool(group_storage);
-                for (lowered.args, stored) |arg, *in_storage| {
-                    switch (arg) {
-                        .none => {},
-                        .indirect => in_storage.* = true,
-                        .registers => |registers| {
-                            const count: u32 = @intCast(registers.pieces.len);
-                            if (used + count <= 12) used += count else in_storage.* = true;
-                        },
-                    }
-                }
-            } else {
-                layout.abi.markRegisterOverflow(self.abiTarget(), lowered, trailing_pointers + @intFromBool(group_storage), stored);
+        } else if (self.target.cpu.arch == .riscv32 or self.target.cpu.arch == .riscv64) {
+            markRiscvFastOverflow(lowered, trailing_pointers + @intFromBool(group_storage), proc.tail_group != null, stored);
+            if (proc.tail_group == null and std.mem.findScalar(bool, stored, true) != null) {
+                markRiscvFastOverflow(lowered, trailing_pointers + 1, false, stored);
             }
+        } else if (proc.tail_group != null) {
+            layout.abi.markRegisterOverflow(self.abiTarget(), lowered, trailing_pointers + @intFromBool(group_storage), stored);
         } else {
             // Arguments past the registers travel in storage the caller owns,
             // through one pointer, rather than each in its own stack slot:
@@ -2155,6 +2148,26 @@ pub const MonoLlvmCodeGen = struct {
             .stored = stored,
             .scratch = .{ .size = cursor.offset, .alignment = cursor.alignment },
         };
+    }
+
+    /// Internal RISC-V fastcc arguments use XLEN slots, independently of
+    /// the external floating-point ABI. Tail groups store indirect arguments
+    /// because their input bytes cannot survive replacement of the caller.
+    fn markRiscvFastOverflow(lowered: layout.abi.LoweredCall, trailing_pointers: u32, tail_group: bool, stored: []bool) void {
+        std.debug.assert(stored.len == lowered.args.len);
+        var used: u32 = @intFromBool(lowered.ret == .indirect) + trailing_pointers;
+        for (lowered.args, stored) |arg, *in_storage| {
+            in_storage.* = false;
+            const count: u32 = switch (arg) {
+                .none => continue,
+                .indirect => if (tail_group) {
+                    in_storage.* = true;
+                    continue;
+                } else 1,
+                .registers => |registers| @intCast(registers.pieces.len),
+            };
+            if (used + count <= 12) used += count else in_storage.* = true;
+        }
     }
 
     const TailScratchCursor = struct {
@@ -16290,6 +16303,53 @@ fn testRiscvPaddedTailGroupForTarget(arities: [2]usize, param_layout: layout.Idx
     try builder.print(&ir.writer);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir.written(), "musttail call fastcc"));
     try std.testing.expect(std.mem.find(u8, ir.written(), "tailcc") == null);
+}
+
+test "RISC-V ordinary fastcc calls reserve storage and hidden pointers for every host ABI" {
+    const allocator = std.testing.allocator;
+    for ([_]roc_target.riscv.Abi{ .ilp32, .ilp32f, .ilp32d, .lp64, .lp64f, .lp64d }) |abi| {
+        var contract = roc_target.riscv.Config.baseline(abi.bits());
+        contract.abi = abi;
+        contract.features.addFeatureSet(std.Target.riscv.featureSet(&.{ .f, .d }));
+        const target = try std.zig.system.resolveTargetQuery(std.testing.io, contract.targetQuery());
+        for ([_]layout.Idx{ .u32, .f64, .str }) |arg_layout| {
+            var store = lir.LirStore.init(allocator);
+            defer store.deinit();
+            var layouts = try layout.Store.init(allocator, if (abi.bits() == 32) .u32 else .u64);
+            defer layouts.deinit();
+            var params: [14]LocalId = undefined;
+            for (&params) |*param| param.* = try store.addLocal(.{ .layout_idx = arg_layout });
+            const proc: LirProcSpec = .{
+                .name = .fromRaw(1),
+                .identity = lir.LIR.ProcIdentity.forTest(1),
+                .args = try store.addLocalSpan(&params),
+                .ret_layout = .str,
+            };
+            var codegen = MonoLlvmCodeGen.initForLinkedObjectWithCAbi(allocator, &store, target, switch (abi) {
+                .ilp32 => .riscv32_ilp32,
+                .ilp32f => .riscv32_ilp32f,
+                .ilp32d => .riscv32_ilp32d,
+                .lp64 => .riscv64_lp64,
+                .lp64f => .riscv64_lp64f,
+                .lp64d => .riscv64_lp64d,
+            });
+            defer codegen.deinit();
+            codegen.layout_store = &layouts;
+            const sig = try codegen.computeFastSignature(codegen.abi_arena.allocator(), proc);
+            // One slot each for the indirect result and argument storage.
+            const slots_per_arg: u32 = if (arg_layout == .f64 and abi.bits() == 32) 2 else 1;
+            const direct_args = 10 / slots_per_arg;
+            for (sig.tail_args.stored, 0..) |stored, i| try std.testing.expectEqual(i >= direct_args, stored);
+            try std.testing.expect(sig.scratch_index != null);
+            try std.testing.expect(sig.scratch.size > 0);
+            for (sig.lowered.args) |arg| {
+                if (arg == .registers) for (arg.registers.pieces) |piece| {
+                    try std.testing.expectEqual(abi.bits(), piece.llvm_integer_bits.?);
+                    try std.testing.expect(piece.llvm_float == null);
+                };
+            }
+        }
+    }
 }
 
 test "RISC-V padded fastcc tail groups share a prototype across different arities" {

@@ -24930,6 +24930,12 @@ requires it under exhaustion. External calls and entry adapters consume the
 same committed placements. Fixed-width SIMD values use the ordinary integer
 convention, not the optional RISC-V vector calling convention.
 
+Internal RISC-V `fastcc` calls classify values using the integer ABI and
+normalize direct argument pieces to XLEN slots, independently of the selected
+external ABI. Ordinary calls reserve hidden pointers within the same twelve-slot
+budget and pass whole overflow arguments in caller-owned storage. If storage is
+needed, its pointer is reserved before assigning argument slots.
+
 RISC-V tail groups use a single padded `fastcc` prototype and `musttail`, not
 `tailcc`. Direct argument pieces are normalized to XLEN integer slots, with fixed pointer
 positions for indirect results, runtime result descriptors, and group storage.
