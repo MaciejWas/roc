@@ -18,7 +18,7 @@ pub const aarch64 = @import("aarch64.zig");
 pub const x86_64 = @import("x86_64.zig");
 pub const wasm = @import("wasm.zig");
 
-/// LP64 layout classifier; call lowering is not yet connected.
+/// RISC-V layout classifiers used by hosted-call ABI lowering.
 pub const riscv32 = @import("riscv32.zig");
 pub const riscv64 = @import("riscv64.zig");
 

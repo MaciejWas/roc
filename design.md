@@ -24556,24 +24556,57 @@ the platform's imported-memory initialization contract and target instruction
 features, and strip debug metadata only for non-debug output. Both remove
 producer metadata; only non-debug size builds remove target-feature metadata.
 
+## RISC-V platform compilation contract
+
+A RISC-V platform target owns its CPU instruction contract independently of its
+host calling convention. The literal `isa` field uses `rv32` or `rv64` followed
+by standard extension names; `abi` selects `Ilp32`, `Ilp32f`, `Ilp32d`, `Lp64`,
+`Lp64f`, or `Lp64d`. `code_model` selects `Medlow` or `Medany`. Omitted fields
+retain the target's explicit RV32I/ILP32 or RV64I/LP64 and Medany defaults.
+Header validation rejects unknown extensions, width mismatches and floating
+calling conventions without the required CPU extension. These resolved fields
+are ordinary target data, never inferred from an OS, a board name, or symbols.
+
+The complete resolved configuration reaches LLVM C ABI lowering and the target
+machine, builtin/runtime compilation and object metadata. Native RISC-V runtime
+support is linked as bitcode and compiled with the application's CPU features,
+ABI and code model, including compiler-rt. Compiler support is private to the
+resulting object. Source platform identity covers these literal settings; the
+object emission identity also contains their canonical representation. No
+RISC-V platform object or runtime payload may be borrowed from another target.
+
+`output: Exe` links firmware using the platform's startup inputs, entry point,
+and linker script. `output: Archive` packages Roc's app and its compiler-owned
+runtime for the platform's external linker; the archive need not define host
+callbacks. All output paths retain the same selected instruction and ABI
+contract. Platform SDKs compile their own objects for a compatible ISA and the
+same ABI. `A` permits instructions; it does not change runtime synchronization.
+
+RISC-V platform execution is serialized by C functions
+`roc_acquire_runtime_lock` and `roc_release_runtime_lock`. Platforms implement
+these using their execution environment: a recursive RTOS mutex, a cross-hart
+lock, or empty functions when exclusive access is guaranteed. All host-side Roc
+value operations also obey this lock. No interrupt enters Roc or accesses its
+values. The compiler never disables interrupts or selects an RTOS. A held lock
+must not be used to wait for a task that itself needs to enter Roc. Enabling A
+does not enable concurrent runtime execution. Serialized runtime cache accesses
+and reference counts use ordinary memory operations; hosted compiler evaluation
+retains its independent synchronization. Pending-call state is passed in frames
+as specified by Pending Cells, not retained in platform task-local storage.
+
 ## Host Symbol ABI
 
-The initial embedded RISC-V target is `riscv64elf`: little-endian RV64I,
-freestanding ELF, with the LP64 integer calling convention and no libc or
-host feature detection. Its CPU contract excludes optional ISA extensions.
-Native freestanding reference-count updates use ordinary loads and stores
-under the platform runtime lock; this includes glue and platform-side value operations.
-Target registration does not imply code-generation support:
-LP64 layout classification consumes committed layouts and uses the standard
-integer calling convention, including integer-chunk transport for floats and
-fixed-length vectors. The LP64 LLVM call plan reuses AArch64's exact-byte
-piece packing and array carriers. A register piece records an explicit LLVM
-floating-point carrier when LP64 transports a scalar float in integer registers;
-consumers bitcast its bits rather than converting its numeric value. Named
-arguments retain their natural LLVM carriers under register exhaustion; LLVM
-assigns their register/stack splits and the leading indirect-result pointer.
+RISC-V platform configuration, runtime synchronization and output ownership
+follow the RISC-V platform compilation contract above. Integer ABI
+classification consumes committed layouts. Hardware-float ABI classification
+flattens eligible one/two-leaf records, counts the integer and floating-point
+argument registers separately, and uses the integer convention when the psABI
+requires it under exhaustion. External calls and entry adapters consume the
+same committed placements. Fixed-width SIMD values use the ordinary integer
+convention, not the optional RISC-V vector calling convention.
+
 RISC-V tail groups use a single padded `fastcc` prototype and `musttail`, not
-`tailcc`. Direct argument pieces are normalized to i64 slots, with fixed pointer
+`tailcc`. Direct argument pieces are normalized to XLEN integer slots, with fixed pointer
 positions for indirect results, runtime result descriptors, and group storage.
 The group pads to its maximum direct slot count using zero values. At most twelve
 integer/pointer slots are passed, including hidden pointers: the bundled LLVM
@@ -24581,82 +24614,8 @@ integer/pointer slots are passed, including hidden pointers: the bundled LLVM
 and whole arguments that exceed that budget use the existing caller-owned group
 storage; the storage pointer is reserved before assigning direct slots. Members
 copy stored arguments on entry before that storage is reused. Argument and return
-adapters preserve the external LP64 ABI. Self-tail loops and other targets keep
-their existing conventions. The compiler bundles RV64I builtins (including
-compiler-rt) and standalone boxy runtime objects with their own content digests.
-The normal LLVM build selects dedicated full/core RV64I symbol-ABI builtin
-bitcode so Zig resolves task-local state for the native target, rather than
-reusing Wasm's global state. The platform-facing `roc_cleanup_task_state`
-export remains external through builtin pruning and final optimization even
-when no Roc procedure calls it; both full and core payloads define it. Only
-the final platform app object exports runtime entry points; cached procedure
-packs retain their used builtins privately. LLVM RISC-V output uses the standard
-medium-any (`medany`) code model, addressing code and data within one 2 GiB
-window without restricting firmware to the low-address `medlow` range.
-Target metadata owns the runtime ABI, native builtin payload selection, LLVM
-availability, and code model. Build-time embedding, host-symbol validation, and
-code generation consume those declarations rather than maintaining their own
-architecture lists. Task-state components are indexed by an enum and each
-owner supplies its cleanup routine.
-ELF executable platform entries may declare literal `linker_script` and
-`entry_point` strings. The linker script follows the same platform-contained
-path validation and inputs_dir/<target>/ resolution as link input files, and
-is validated as a required file. Empty/NUL strings, path traversal, duplicate
-fields, and use on non-ELF or non-executable output are rejected during header
-validation. Resolved settings travel explicitly to the linker; no raw linker
-flags or script discovery are used. The platform builds its native archive,
-startup object, and script once. Ordinary `roc build` links these with the app
-into the final firmware ELF; QEMU consumes that ELF directly.
-RISC-V has no bundled default platform; a FreeRTOS platform supplies the host
-callbacks and startup. Runtime integration must not borrow another target's
-artifacts.
-
-On native freestanding targets, the standalone boxy runtime allocates its own
-bookkeeping through the platform's existing allocation symbols, just like Roc
-values. It does not request OS pages or impose its own fixed-size memory pool.
-The adapter preserves requested size and alignment, forwards reallocations and
-frees, and follows the existing host contract: allocation failure terminates
-Roc execution through the platform rather than returning a null pointer.
-Shared bookkeeping retains its existing runtime lifetime. Other targets retain
-their existing allocation providers.
-
-Native freestanding output requires platform-managed task state and locking.
-The example implements this with FreeRTOS. Multiple tasks
-may call Roc, with execution serialized by a platform-wide recursive mutex.
-The platform implements C-convention `roc_get_task_state() -> ptr`
-and `roc_set_task_state(ptr)` using one task-local storage slot, initially null.
-The pointer is opaque to the platform. Callbacks do not enter Roc and are not
-called from interrupts. The runtime allocates one task root and explicitly
-registered callable, active-runtime, and tail-state components through platform
-allocation. No ID tables, shared lookup locks, native TLS, or OS thread lookup
-are used for this state on freestanding targets.
-
-The platform also supplies C-convention `roc_acquire_runtime_lock() -> void`
-and `roc_release_runtime_lock() -> void`, backed by the same FreeRTOS recursive
-mutex for all tasks entering this runtime. The platform creates it before any
-Roc entry. Acquire waits until ownership is obtained; neither callback enters
-Roc, and returning without success violates the platform contract. Generated
-platform C-ABI wrappers acquire before runtime initialization and execution,
-load register return values before releasing, and release on every normal
-return, including void and indirect results. Internal and tail calls do not
-release the mutex. Same-task nested platform entry recursively acquires it;
-platform callbacks run with the mutex held. In-process compiler evaluation and
-other targets retain their existing entry behavior. Calls that do not return
-normally require platform-level termination; cooperative shutdown does not
-unwind an interrupted Roc call. Direct internal runtime entry and glue value
-operations outside generated wrappers must also be enclosed by the platform
-in this same mutex for all Roc value and runtime operations, including
-reference-count updates and uniqueness checks.
-
-Shutdown is cooperative: the task returns from every Roc invocation, releases
-its owned Roc values, and calls the runtime's C-convention
-`roc_cleanup_task_state() -> void` before deletion. Each component validates its
-inactive-state invariants and releases its buffers; cleanup acquires the same
-recursive mutex, frees the task root, and clears the platform slot. Cleanup on an empty slot does nothing. New tasks
-start with null state even when task handles are reused. Deletion during Roc
-execution and interrupt re-entry are unsupported. Shared runtime data is not
-freed by per-task cleanup. Hosted and Wasm targets retain their existing
-providers; the six-symbol common runtime ABI remains unchanged.
+adapters preserve the selected external ABI. Self-tail loops and other targets keep
+their existing conventions.
 
 The program's hosted catalog retains every visible hosted declaration and
 classifies its platform binding as mapped or unavailable. Only mapped entries

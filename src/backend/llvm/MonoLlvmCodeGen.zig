@@ -294,6 +294,7 @@ pub const MonoLlvmCodeGen = struct {
     /// The declarations a stack-bound check names in the current module.
     stack_check_decls: ?StackCheckDecls = null,
     target: std.Target,
+    c_abi_target: layout.abi.Target,
     triple: []const u8,
     data_layout: []const u8,
     builtin_symbol_mode: BuiltinSymbolMode = .bitcode,
@@ -679,6 +680,7 @@ pub const MonoLlvmCodeGen = struct {
         return .{
             .allocator = allocator,
             .target = builtin.target,
+            .c_abi_target = cAbiTargetFor(builtin.target),
             .triple = getLlvmTriple(builtin.target),
             .data_layout = getLlvmDataLayout(builtin.target),
             .store = store,
@@ -715,6 +717,7 @@ pub const MonoLlvmCodeGen = struct {
     ) MonoLlvmCodeGen {
         var self = init(allocator, store);
         self.target = target;
+        self.c_abi_target = cAbiTargetFor(target);
         self.triple = getLlvmTriple(target);
         self.data_layout = getLlvmDataLayout(target);
         return self;
@@ -726,9 +729,20 @@ pub const MonoLlvmCodeGen = struct {
         store: *const lir.LirStore,
         target: std.Target,
     ) MonoLlvmCodeGen {
+        return initForLinkedObjectWithCAbi(allocator, store, target, cAbiTargetFor(target));
+    }
+
+    /// Initializes a linked-object backend with an explicit hosted-call ABI.
+    pub fn initForLinkedObjectWithCAbi(
+        allocator: Allocator,
+        store: *const lir.LirStore,
+        target: std.Target,
+        c_abi_target: layout.abi.Target,
+    ) MonoLlvmCodeGen {
         // Linked objects import the runtime and hosted symbols the platform
         // host defines.
         var self = initWithTarget(allocator, store, target);
+        self.c_abi_target = c_abi_target;
         self.builtin_symbol_mode = .native_object;
         self.proc_symbol_mode = .lir_symbol;
         self.program_kind = .platform;
@@ -3240,7 +3254,7 @@ pub const MonoLlvmCodeGen = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const lowered = layout.abi.lower(arena, self.layouts(), self.abiTarget(), arg_layouts, ret_layout, false) catch return error.OutOfMemory;
+        const lowered = self.lowerCAbi(arena, arg_layouts, ret_layout) catch return error.OutOfMemory;
 
         var param_types = std.ArrayList(LlvmBuilder.Type).empty;
         defer param_types.deinit(self.allocator);
@@ -3469,7 +3483,7 @@ pub const MonoLlvmCodeGen = struct {
     }
 
     fn emitPlatformRuntimeLock(self: *MonoLlvmCodeGen, comptime acquire: bool) Error!void {
-        if (self.program_kind != .platform or roc_target.runtimeAbiForTarget(self.target.cpu.arch, self.target.os.tag) != .task_local) return;
+        if (self.program_kind != .platform or roc_target.runtimeAbiForTarget(self.target.cpu.arch, self.target.os.tag) != .platform_serialized) return;
         const builder = self.builder orelse return error.CompilationFailed;
         const wip = self.wip orelse return error.CompilationFailed;
         const fn_ty = builder.fnType(.void, &.{}, .normal) catch return error.OutOfMemory;
@@ -14123,19 +14137,28 @@ pub const MonoLlvmCodeGen = struct {
         }
     }
 
+    fn lowerCAbi(self: *MonoLlvmCodeGen, arena: std.mem.Allocator, args: []const layout.Idx, ret: layout.Idx) Error!layout.abi.LoweredCall {
+        return layout.abi.lower(arena, self.layouts(), self.c_abi_target, args, ret, false);
+    }
+
     /// The C-ABI target this build is compiling for.
     fn abiTarget(self: *const MonoLlvmCodeGen) layout.abi.Target {
-        const arch = self.target.cpu.arch;
+        return self.c_abi_target;
+    }
+
+    /// Selects the default C ABI for a standard target.
+    pub fn cAbiTargetFor(target: std.Target) layout.abi.Target {
+        const arch = target.cpu.arch;
         if (arch == .riscv32) return .riscv32_ilp32;
         if (arch == .riscv64) return .riscv64_lp64;
         if (arch == .aarch64 or arch == .aarch64_be) {
-            return layout.abi.aarch64Target(self.target.os.tag);
+            return layout.abi.aarch64Target(target.os.tag);
         } else if (arch == .x86_64) {
-            return if (self.target.os.tag == .windows) .x86_64_windows else .x86_64_sysv;
+            return if (target.os.tag == .windows) .x86_64_windows else .x86_64_sysv;
         } else if (arch == .wasm32) {
             // WebAssembly 1.0 has no vector values, so a target without
             // simd128 passes vectors by lane, as the other backends do.
-            return if (std.Target.wasm.featureSetHas(self.target.cpu.features, .simd128)) .wasm32 else .wasm32v1;
+            return if (std.Target.wasm.featureSetHas(target.cpu.features, .simd128)) .wasm32 else .wasm32v1;
         } else if (arch == .wasm64) {
             return .wasm64;
         } else {
@@ -14717,7 +14740,7 @@ pub const MonoLlvmCodeGen = struct {
 
         // The host reaches its own runtime operations directly, so hosted
         // functions never take a leading host pointer.
-        const lowered = layout.abi.lower(arena, self.layouts(), self.abiTarget(), arg_layouts, ret_layout, false) catch return error.OutOfMemory;
+        const lowered = self.lowerCAbi(arena, arg_layouts, ret_layout) catch return error.OutOfMemory;
 
         var param_types = std.ArrayList(LlvmBuilder.Type).empty;
         defer param_types.deinit(self.allocator);

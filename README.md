@@ -2,7 +2,7 @@
 
 This is a fork of the ROC compiler on top of which I'm adding funcitonality I'm interested in. For now this is
 
-* 32/64 bit RISC-V support as compilation target
+* 32/64 bit RISC-V support as compilation target ([platform configuration](docs/riscv-platforms.md))
 * ( General support for embedded use of ROC. I'll be writing more features here as they come)
 
 > [!WARNING]  

@@ -844,7 +844,7 @@ fn buildLinkArgs(ctx: *CliCtx, config: LinkConfig) LinkError!std.array_list.Mana
             std.debug.assert(config.target_format == .elf or config.target_format == .wasm);
             switch (config.target_format) {
                 .elf => try args.appendSlice(&.{ "ld.lld", "-o", config.output_path, "-nostdlib", "-static", "--gc-sections" }),
-                .coff, .macho => unreachable,
+                .coff, .macho => unreachable, // freestanding targets select ELF or WebAssembly object format
                 .wasm => {
                     // WebAssembly linker (wasm-ld) for freestanding wasm32 target
                     try args.append("wasm-ld");
