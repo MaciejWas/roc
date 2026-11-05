@@ -1052,6 +1052,7 @@ fn createAndRunBuiltinCompiler(
     roc_modules: modules.RocModules,
     flag_enable_tracy: ?[]const u8,
     roc_files: []const []const u8,
+    strip: ?bool,
 ) BuiltinCompilerRun {
     // Build and run the compiler
     const builtin_compiler_exe = b.addExecutable(.{
@@ -1065,6 +1066,8 @@ fn createAndRunBuiltinCompiler(
             // large checked_artifact.zig), adding far more `zig build` wall-clock than
             // the one-time bake run saves. Debug compile + Debug bake is the faster total.
             .optimize = .debug,
+            // Honor the build's explicit debug-info policy on this root too.
+            .strip = strip,
             // ctx.CoreCtx reads env vars via std.c.getenv; Zig 0.16 requires
             // link_libc=true on any compile unit that references std.c.*.
             // (add_tracy below also sets this when tracy is enabled, but tracy is
@@ -2255,7 +2258,7 @@ pub fn build(b: *std.Build) void {
     const write_compiled_builtins = b.addWriteFiles();
 
     // Always regenerate .bin files to ensure they match the current compiler
-    const builtin_compiler = createAndRunBuiltinCompiler(b, roc_modules, flag_enable_tracy, &.{builtin_roc_path});
+    const builtin_compiler = createAndRunBuiltinCompiler(b, roc_modules, flag_enable_tracy, &.{builtin_roc_path}, strip_flag);
     const bake_repro = CheckBuiltinBakeReproducibleStep.create(b, builtin_compiler.exe);
     build_test_builtin_bake_reproducible_step.dependOn(&builtin_compiler.exe.step);
     run_test_builtin_bake_reproducible_step.dependOn(build_test_builtin_bake_reproducible_step);
@@ -2591,6 +2594,15 @@ pub fn build(b: *std.Build) void {
     fixture_options.addOption([]const u8, "build_root", b.root.joinString(b.allocator, "") catch @panic("OOM"));
     roc_modules.addAll(roc_exe);
     const roc_install_step = install_and_run(b, no_bin, roc_exe, strip_macho_exports_tool, build_roc_step, run_roc_step, run_args, &.{});
+
+    // Opt-in cross-target execution checks: Zig and both RISC-V QEMU system
+    // emulators must be installed. The fixture supplies its own bare-metal host.
+    const riscv_platform_tests = b.addSystemCommand(&.{"python3"});
+    riscv_platform_tests.addFileArg(b.path("test/riscv/run.py"));
+    riscv_platform_tests.addArg("--roc");
+    riscv_platform_tests.addFileArg(fixture_roc);
+    riscv_platform_tests.step.dependOn(build_roc_step);
+    b.step("run-test-riscv-platforms", "Run bare-metal RISC-V ISA, ABI, and external-link tests in QEMU").dependOn(&riscv_platform_tests.step);
 
     const run_builtin_format = b.addRunArtifact(roc_exe);
     run_builtin_format.addArgs(&.{ "fmt", "--check", "src/build/roc/Builtin.roc" });
@@ -3004,7 +3016,13 @@ pub fn build(b: *std.Build) void {
         const core_name = b.fmt("builtins_{s}_core_extern.bc", .{name});
         _ = llvm_embedded_files.addCopyFile(addBuiltinsBitcode(b, roc_modules, b.fmt("_{s}_extern_bc", .{name}), "src/builtins/extern_static_lib.zig", resolved, false), full_name);
         _ = llvm_embedded_files.addCopyFile(addBuiltinsBitcode(b, roc_modules, b.fmt("_{s}_core_extern_bc", .{name}), "src/builtins/extern_static_lib_core.zig", resolved, false), core_name);
-        builtin_runtime_entries.print(b.allocator, "    .{{ .target = .{s}, .full = @embedFile(\"{s}\"), .core = @embedFile(\"{s}\") }},\n", .{ name, full_name, core_name }) catch @panic("OOM");
+        const boxy_name = b.fmt("boxy_{s}.bc", .{name});
+        const boxy = addBoxyRuntimeObject(b, roc_modules, b.fmt("roc_boxy_bc_{s}", .{name}), "src/boxy_runtime/static_lib.zig", resolved);
+        boxy.use_llvm = true;
+        boxy.bundle_compiler_rt = false;
+        _ = boxy.getEmittedBin();
+        _ = llvm_embedded_files.addCopyFile(boxy.getEmittedLlvmBc(), boxy_name);
+        builtin_runtime_entries.print(b.allocator, "    .{{ .target = .{s}, .full = @embedFile(\"{s}\"), .core = @embedFile(\"{s}\"), .boxy = @embedFile(\"{s}\") }},\n", .{ name, full_name, core_name, boxy_name }) catch @panic("OOM");
     }
 
     const llvm_embedded_fixed_source: []const u8 =
@@ -3027,7 +3045,7 @@ pub fn build(b: *std.Build) void {
         \\
     ;
     const llvm_embedded_source = b.fmt(
-        "{s}{s}}};\npub const BuiltinRuntime = struct {{ target: @import(\"roc_target\").RocTarget, full: []const u8, core: []const u8 }};\npub const builtin_runtimes = [_]BuiltinRuntime{{\n{s}}};\n",
+        "{s}{s}}};\npub const BuiltinRuntime = struct {{ target: @import(\"roc_target\").RocTarget, full: []const u8, core: []const u8, boxy: []const u8 }};\npub const builtin_runtimes = [_]BuiltinRuntime{{\n{s}}};\n",
         .{ llvm_embedded_fixed_source, private_runtime_entries.items, builtin_runtime_entries.items },
     );
 

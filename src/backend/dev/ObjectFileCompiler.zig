@@ -124,6 +124,9 @@ pub const CompilationError = error{
 /// Supports compilation to any RocTarget via runtime-to-comptime dispatch.
 pub const ObjectFileCompiler = struct {
     allocator: Allocator,
+    /// ELF ABI flags specified by the selected RISC-V platform target for
+    /// data-only objects.
+    riscv_flags: u32 = 0,
     enable_default_platform_runtime: bool = false,
     /// Bytes the program's erased callables reserve before their captures
     /// (`LirProgram.Result.erased_capture_prefix`); nonzero when its code
@@ -416,7 +419,7 @@ pub const ObjectFileCompiler = struct {
         static_data_exports: []const StaticDataExport,
         target: RocTarget,
     ) CompilationError!CompilationResult {
-        return compileStaticDataObjectBytes(self.allocator, static_data_exports, target);
+        return compileStaticDataObjectBytes(self.allocator, static_data_exports, target, self.riscv_flags);
     }
 
     /// Emit a data-only object and write it to a path.
@@ -1186,6 +1189,7 @@ fn compileStaticDataObjectBytes(
     allocator: Allocator,
     static_data_exports: []const StaticDataExport,
     target: RocTarget,
+    riscv_flags: u32,
 ) CompilationError!CompilationResult {
     if (static_data_exports.len == 0) {
         return CompilationError.NoEntrypoints;
@@ -1222,7 +1226,7 @@ fn compileStaticDataObjectBytes(
     if (target == .riscv32elf or target == .riscv64elf) {
         var alignment: u32 = 1;
         for (static_data_exports) |item| alignment = @max(alignment, item.alignment);
-        try @import("object/riscv_data.zig").emit(allocator, if (target == .riscv32elf) 32 else 64, rodata.items, zero_fill_size, alignment, resolved.symbols, rodata_relocations.items, &output);
+        try @import("object/riscv_data.zig").emit(allocator, if (target == .riscv32elf) 32 else 64, riscv_flags, rodata.items, zero_fill_size, alignment, resolved.symbols, rodata_relocations.items, &output);
     } else {
         ObjectWriter.generateIndexedObjectFileWithDebug(
             allocator,
@@ -1923,7 +1927,7 @@ test "RISC-V data objects encode target-width absolute relocations" {
     for ([_]u16{ 32, 64 }) |bits| {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(a);
-        try @import("object/riscv_data.zig").emit(a, bits, &data, 64, 32, &syms, &rels, &out);
+        try @import("object/riscv_data.zig").emit(a, bits, 0, &data, 64, 32, &syms, &rels, &out);
         try std.testing.expectEqualSlices(u8, "\x7fELF", out.items[0..4]);
         try std.testing.expectEqual(@as(u8, if (bits == 32) 1 else 2), out.items[4]);
         try std.testing.expectEqual(@as(u16, 243), std.mem.readInt(u16, out.items[18..20], .little));

@@ -36,7 +36,7 @@ pub const runtime_symbols: [shim_symbols.runtime_set.len][]const u8 = blk: {
     break :blk symbols;
 };
 
-const task_runtime_symbols = blk: {
+const serialized_runtime_symbols = blk: {
     var symbols: [shim_symbols.freestanding_runtime_set.len][]const u8 = undefined;
     for (shim_symbols.freestanding_runtime_set, 0..) |name, index| symbols[index] = name;
     break :blk symbols;
@@ -45,7 +45,7 @@ const task_runtime_symbols = blk: {
 pub fn runtimeSymbols(target: RocTarget) []const []const u8 {
     return switch (target.runtimeAbi()) {
         .standard => &runtime_symbols,
-        .task_local => &task_runtime_symbols,
+        .platform_serialized => &serialized_runtime_symbols,
     };
 }
 
@@ -1150,13 +1150,11 @@ test "open inspection handles detect atomic replacement and survive mid-read tru
     try std.testing.expect(!sameFileState(before, try file.stat(io)));
 }
 
-test "native freestanding platforms require task-state callbacks" {
+test "native freestanding platforms require only execution locking callbacks" {
     const native = runtimeSymbols(.riscv64elf);
-    try std.testing.expectEqual(runtime_symbols.len + 4, native.len);
-    try std.testing.expectEqualStrings(shim_symbols.roc_get_task_state, native[runtime_symbols.len]);
-    try std.testing.expectEqualStrings(shim_symbols.roc_set_task_state, native[runtime_symbols.len + 1]);
-    try std.testing.expectEqualStrings(shim_symbols.roc_acquire_runtime_lock, native[runtime_symbols.len + 2]);
-    try std.testing.expectEqualStrings(shim_symbols.roc_release_runtime_lock, native[runtime_symbols.len + 3]);
+    try std.testing.expectEqual(runtime_symbols.len + 2, native.len);
+    try std.testing.expectEqualStrings(shim_symbols.roc_acquire_runtime_lock, native[runtime_symbols.len]);
+    try std.testing.expectEqualStrings(shim_symbols.roc_release_runtime_lock, native[runtime_symbols.len + 1]);
     try std.testing.expectEqual(runtime_symbols.len, runtimeSymbols(.wasm32).len);
     try std.testing.expectEqual(runtime_symbols.len, runtimeSymbols(.arm64linux).len);
     try std.testing.expectEqual(runtime_symbols.len, runtimeSymbols(.x64win).len);

@@ -8243,10 +8243,10 @@ fn rocBuildDefaultApp(ctx: *CliCtx, args: cli_args.BuildArgs, staged: *default_a
     defer staged.deinit(ctx.gpa);
 
     const target = defaultBuildTarget(args);
-    if (target.runtimeAbi() == .task_local or target.toOsTag() == .openbsd) {
+    if (target.runtimeAbi() == .platform_serialized or target.toOsTag() == .openbsd) {
         return ctx.fail(.{ .unsupported_default_platform_target = .{
             .target = target.toName(),
-            .reason = if (target.runtimeAbi() == .task_local) .platform_required else .missing_sysroot,
+            .reason = if (target.runtimeAbi() == .platform_serialized) .platform_required else .missing_sysroot,
         } });
     }
 
@@ -9746,10 +9746,23 @@ test "wasm32 LLVM objects are always position-independent" {
     try std.testing.expect(llvmObjectUsesPic(.wasm32, .shared, false));
 }
 
+fn llvmCAbiTarget(std_target: std.Target, riscv: ?roc_target.riscv.Config) layout.abi.Target {
+    if (riscv) |contract| return switch (contract.abi) {
+        .ilp32 => .riscv32_ilp32,
+        .ilp32f => .riscv32_ilp32f,
+        .ilp32d => .riscv32_ilp32d,
+        .lp64 => .riscv64_lp64,
+        .lp64f => .riscv64_lp64f,
+        .lp64d => .riscv64_lp64d,
+    };
+    return llvm_codegen.MonoLlvmCodeGen.cAbiTargetFor(std_target);
+}
+
 fn compileLlvmAppObject(
     ctx: *CliCtx,
     args: cli_args.BuildArgs,
     target: RocTarget,
+    riscv: ?roc_target.riscv.Config,
     link_type: roc_target.OutputKind,
     lowered: *const lir.CheckedPipeline.LoweredProgram,
     entrypoints: []const backend.Entrypoint,
@@ -9764,7 +9777,10 @@ fn compileLlvmAppObject(
     // "LLVM Optimize + Emit" phase at the point LLVM takes over the bitcode.
     reporter: ?*progress.Reporter,
 ) CliMainError!LlvmObjectPaths {
-    const std_target = try stdTargetForLlvmBuild(ctx, target);
+    const std_target = if (riscv) |contract|
+        try std.zig.system.resolveTargetQuery(ctx.io.std_io, contract.targetQuery())
+    else
+        try stdTargetForLlvmBuild(ctx, target);
     const llvm_cpu = llvmCpuNameForTarget(std_target);
     const llvm_features = try llvmFeatureStringForTarget(ctx.arena, std_target);
 
@@ -9772,10 +9788,11 @@ fn compileLlvmAppObject(
 
     // Release code-generation scratch before LLVM optimization starts.
     var bitcode = generate: {
-        var codegen = llvm_codegen.MonoLlvmCodeGen.initForLinkedObject(
+        var codegen = llvm_codegen.MonoLlvmCodeGen.initForLinkedObjectWithCAbi(
             ctx.gpa,
             &lowered.lir_result.store,
             std_target,
+            llvmCAbiTarget(std_target, riscv),
         );
         codegen.layout_store = &lowered.lir_result.layouts;
         codegen.emit_debug_info = emit_debug_info;
@@ -9822,6 +9839,7 @@ fn compileLlvmAppObject(
     tuning_hash.update(llvm_cpu);
     tuning_hash.update(&[_]u8{0});
     tuning_hash.update(llvm_features);
+    if (riscv) |contract| contract.updateHash(&tuning_hash);
     const tuning_hash_value = tuning_hash.final();
     const fuzz_suffix: []const u8 = if (args.fuzz) "_fuzz" else "";
     const bitcode_filename = try std.fmt.allocPrint(ctx.arena, "roc_app_llvm_{s}_{s}_{x}{s}{s}{s}.bc", .{ target_name, opt_name, tuning_hash_value, kind_suffix, debug_suffix, fuzz_suffix });
@@ -9848,6 +9866,8 @@ fn compileLlvmAppObject(
         .output_path = object_path,
         .optimization = llvmOptimizationLevel(args.opt),
         .target = target,
+        .riscv = riscv,
+        .boxy_runtime = lowered.lir_result.store.runtime_contract == .boxy,
         .report_config = ctx.reportConfig(.stderr),
         .cpu = llvm_cpu,
         .features = llvm_features,
@@ -9986,6 +10006,7 @@ fn rocBuildWasmLlvm(
         ctx,
         args,
         target,
+        null,
         link_type,
         lowered,
         entrypoints,
@@ -11044,6 +11065,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
             ctx,
             args,
             target,
+            selected.link_spec.riscv,
             link_type,
             &lowered,
             entrypoints,
@@ -11060,6 +11082,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
         var static_data_obj_path: ?[]const u8 = null;
         if (static_data_exports.len > 0) {
             var object_compiler = backend.ObjectFileCompiler.init(ctx.gpa);
+            if (selected.link_spec.riscv) |contract| object_compiler.riscv_flags = contract.elfFlags();
             const static_obj_filename = try std.fmt.allocPrint(ctx.arena, "roc_static_data_{s}.o", .{@tagName(target)});
             const static_obj_path = try std.fs.path.join(ctx.arena, &.{ app_object.artifact_dir, static_obj_filename });
             try object_compiler.compileStaticDataObjectAndWrite(
@@ -11080,7 +11103,7 @@ fn rocBuildLlvm(ctx: *CliCtx, args: cli_args.BuildArgs) CliMainError!BuildResult
         }
         // A `.boxy` program's code calls the Boxy runtime's `roc_desc_*`
         // entry points; a specialized program neither links nor references it.
-        if (lowered.lir_result.store.runtime_contract == .boxy) {
+        if (lowered.lir_result.store.runtime_contract == .boxy and selected.link_spec.riscv == null) {
             try object_files.append(try writeBoxyRuntimeObject(ctx, app_object.artifact_dir, target));
         }
         if (enable_default_platform_runtime) {

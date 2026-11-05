@@ -10,7 +10,7 @@ fn pad(a: Allocator, out: *std.ArrayList(u8), alignment: usize) (Allocator.Error
     try out.appendNTimes(a, 0, std.mem.alignForward(usize, out.items.len, alignment) - out.items.len);
 }
 const Section = struct { name: u32, kind: u32, flags: u64, offset: u64, size: u64, link: u32 = 0, info: u32 = 0, alignment: u64 = 1, entry: u64 = 0 };
-pub fn emit(a: Allocator, bits: u16, data: []const u8, bss: u64, alignment: u32, symbols: []const facade.Symbol, relocations: []const facade.IndexedDataRelocation, out: *std.ArrayList(u8)) (Allocator.Error || error{UnsupportedTarget})!void {
+pub fn emit(a: Allocator, bits: u16, flags: u32, data: []const u8, bss: u64, alignment: u32, symbols: []const facade.Symbol, relocations: []const facade.IndexedDataRelocation, out: *std.ArrayList(u8)) (Allocator.Error || error{UnsupportedTarget})!void {
     std.debug.assert(bits == 32 or bits == 64);
     const wide = bits == 64;
     const word: usize = bits / 8;
@@ -139,7 +139,7 @@ pub fn emit(a: Allocator, bits: u16, data: []const u8, bss: u64, alignment: u32,
         try put(a, &header, u32, 0);
         try put(a, &header, u32, sh_offset);
     }
-    try put(a, &header, u32, 0);
+    try put(a, &header, u32, flags);
     try put(a, &header, u16, header_size);
     try put(a, &header, u16, 0);
     try put(a, &header, u16, 0);

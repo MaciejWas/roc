@@ -20,7 +20,3 @@ comptime {
     // the prebuilt object empty.
     if (static_lib != static_lib) unreachable; // a type always equals itself; the comparison only forces analysis
 }
-
-comptime {
-    @import("execution_context.zig").exportTaskCleanup();
-}

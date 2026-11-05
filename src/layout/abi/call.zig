@@ -156,8 +156,16 @@ pub const PhysicalCall = struct {
 pub const Target = enum {
     /// RISC-V ELF integer calling convention with 32-bit pointers.
     riscv32_ilp32,
+    /// RISC-V ELF single-precision hardware-float calling convention.
+    riscv32_ilp32f,
+    /// RISC-V ELF double-precision hardware-float calling convention.
+    riscv32_ilp32d,
     /// RISC-V ELF integer calling convention with 64-bit pointers.
     riscv64_lp64,
+    /// RISC-V ELF single-precision hardware-float calling convention.
+    riscv64_lp64f,
+    /// RISC-V ELF double-precision hardware-float calling convention.
+    riscv64_lp64d,
     /// AAPCS64 on ELF targets.
     aarch64,
     aarch64_macho,
@@ -222,7 +230,18 @@ pub fn aarch64Target(os: std.Target.Os.Tag) Target {
 fn isAarch64(target: Target) bool {
     return switch (target) {
         .aarch64, .aarch64_macho, .aarch64_windows => true,
-        .x86_64_sysv, .x86_64_windows, .wasm32, .wasm32v1, .wasm64, .riscv32_ilp32, .riscv64_lp64 => false,
+        .x86_64_sysv,
+        .x86_64_windows,
+        .wasm32,
+        .wasm32v1,
+        .wasm64,
+        .riscv32_ilp32,
+        .riscv32_ilp32f,
+        .riscv32_ilp32d,
+        .riscv64_lp64,
+        .riscv64_lp64f,
+        .riscv64_lp64d,
+        => false,
     };
 }
 
@@ -237,6 +256,20 @@ pub fn lower(
     ret_idx: Idx,
     needs_ops: bool,
 ) std.mem.Allocator.Error!LoweredCall {
+    const riscv_float_bits: ?u16 = switch (target) {
+        .riscv32_ilp32f, .riscv64_lp64f => 32,
+        .riscv32_ilp32d, .riscv64_lp64d => 64,
+        else => null,
+    };
+    if (riscv_float_bits) |float_bits| {
+        const integer_target: Target = switch (target) {
+            .riscv32_ilp32f, .riscv32_ilp32d => .riscv32_ilp32,
+            .riscv64_lp64f, .riscv64_lp64d => .riscv64_lp64,
+            else => unreachable,
+        };
+        return lowerRiscvFloat(arena, store, integer_target, arg_idxs, ret_idx, needs_ops, float_bits);
+    }
+
     const args = try arena.alloc(Placement, arg_idxs.len);
     for (arg_idxs, args) |arg_idx, *placement| {
         placement.* = try placementFor(arena, store, target, arg_idx, .arg);
@@ -307,10 +340,25 @@ pub const wasm_max_function_params: u32 = 1000;
 /// argument.
 pub fn markRegisterOverflow(target: Target, lowered: LoweredCall, trailing_pointers: u32, overflow: []bool) void {
     std.debug.assert(overflow.len == lowered.args.len);
-    std.debug.assert(target != .riscv32_ilp32 and target != .riscv64_lp64); // fastcc groups use their normalized prototype slot budget
+    std.debug.assert(switch (target) {
+        .riscv32_ilp32,
+        .riscv32_ilp32f,
+        .riscv32_ilp32d,
+        .riscv64_lp64,
+        .riscv64_lp64f,
+        .riscv64_lp64d,
+        => false,
+        else => true,
+    }); // fastcc groups use their normalized prototype slot budget
     @memset(overflow, false);
     switch (target) {
-        .riscv32_ilp32, .riscv64_lp64 => unreachable, // normalized fastcc prototypes are planned by the LLVM backend
+        .riscv32_ilp32,
+        .riscv32_ilp32f,
+        .riscv32_ilp32d,
+        .riscv64_lp64,
+        .riscv64_lp64f,
+        .riscv64_lp64d,
+        => unreachable, // normalized fastcc prototypes are planned by the LLVM backend
         .x86_64_windows => {
             // Every argument, and an indirect result's pointer, takes one
             // shared position.
@@ -479,7 +527,13 @@ pub fn assignPhysicalArgs(
     var stack_size: u32 = 0;
 
     if (lowered.ret == .indirect) switch (target) {
-        .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
+        .riscv32_ilp32,
+        .riscv32_ilp32f,
+        .riscv32_ilp32d,
+        .riscv64_lp64,
+        .riscv64_lp64f,
+        .riscv64_lp64d,
+        => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
         .x86_64_sysv, .x86_64_windows => {
             gp_used = 1;
             win_position = 1;
@@ -488,7 +542,13 @@ pub fn assignPhysicalArgs(
         .wasm32, .wasm32v1, .wasm64 => unreachable, // the entry assertion rejects wasm targets
     };
     if (lowered.leading_ops) switch (target) {
-        .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
+        .riscv32_ilp32,
+        .riscv32_ilp32f,
+        .riscv32_ilp32d,
+        .riscv64_lp64,
+        .riscv64_lp64f,
+        .riscv64_lp64d,
+        => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
         .x86_64_windows => {
             gp_used += 1;
             win_position += 1;
@@ -506,7 +566,13 @@ pub fn assignPhysicalArgs(
         switch (placement) {
             .none => assigned.* = .none,
             .indirect => switch (target) {
-                .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
+                .riscv32_ilp32,
+                .riscv32_ilp32f,
+                .riscv32_ilp32d,
+                .riscv64_lp64,
+                .riscv64_lp64f,
+                .riscv64_lp64d,
+                => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
                 .x86_64_sysv => assigned.* = .{ .stack_value = assignStackValue(
                     &stack_size,
                     size_align.size,
@@ -533,7 +599,13 @@ pub fn assignPhysicalArgs(
                 .wasm32, .wasm32v1, .wasm64 => unreachable, // the entry assertion rejects wasm targets
             },
             .registers => |registers| switch (target) {
-                .riscv32_ilp32, .riscv64_lp64 => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
+                .riscv32_ilp32,
+                .riscv32_ilp32f,
+                .riscv32_ilp32d,
+                .riscv64_lp64,
+                .riscv64_lp64f,
+                .riscv64_lp64d,
+                => base.invariant("RISC-V calls are assigned by LLVM, never by the native backend", .{}),
                 .x86_64_windows => {
                     const pieces = registers.pieces;
                     std.debug.assert(pieces.len == 1);
@@ -654,6 +726,7 @@ fn placementFor(
     return switch (target) {
         .riscv32_ilp32 => placementRiscv32(arena, store, idx, ctx),
         .riscv64_lp64 => placementRiscv64(arena, store, idx, ctx),
+        .riscv32_ilp32f, .riscv32_ilp32d, .riscv64_lp64f, .riscv64_lp64d => unreachable,
         .aarch64, .aarch64_macho, .aarch64_windows => placementAarch64(arena, store, target, idx, ctx, extend),
         .x86_64_sysv => placementSysV(arena, store, idx, ctx, extend),
         .x86_64_windows => placementWin64(arena, store, idx, ctx, extend),
@@ -733,6 +806,102 @@ fn integerPiecesWithWidth(arena: std.mem.Allocator, size: u32, carrier: Register
         };
     }
     return .{ .registers = .{ .pieces = pieces, .carrier = carrier } };
+}
+
+/// Hardware floating-point RISC-V ABI classification. The integer ABI remains
+/// the rule for values outside the exact one/two-leaf FP aggregate cases and
+/// for arguments whose required register files are exhausted (psABI 2.2).
+pub fn lowerRiscvFloat(
+    arena: std.mem.Allocator,
+    store: *const Store,
+    target: Target,
+    arg_idxs: []const Idx,
+    ret_idx: Idx,
+    needs_ops: bool,
+    float_bits: u16,
+) std.mem.Allocator.Error!LoweredCall {
+    std.debug.assert(target == .riscv32_ilp32 or target == .riscv64_lp64);
+    std.debug.assert(float_bits == 32 or float_bits == 64);
+    var result = try lower(arena, store, target, arg_idxs, ret_idx, needs_ops);
+    const args = try arena.dupe(Placement, result.args);
+    result.args = args;
+    if (try riscvFloatPieces(arena, store, target, ret_idx, float_bits)) |pieces|
+        result.ret = .{ .registers = .{ .pieces = pieces } };
+    var gp: u32 = @intFromBool(result.ret == .indirect) + @as(u32, @intFromBool(needs_ops));
+    var fp: u32 = 0;
+    for (args, arg_idxs) |*arg, idx| {
+        if (try riscvFloatPieces(arena, store, target, idx, float_bits)) |pieces| {
+            var ints: u32 = 0;
+            var floats: u32 = 0;
+            for (pieces) |piece| {
+                if (piece.class == .float) {
+                    floats += 1;
+                } else {
+                    ints += 1;
+                }
+            }
+            if (fp + floats <= 8 and gp + ints <= 8) {
+                arg.* = .{ .registers = .{ .pieces = pieces } };
+                gp += ints;
+                fp += floats;
+                continue;
+            }
+        }
+        gp = @min(8, gp + switch (arg.*) {
+            .none => @as(u32, 0),
+            .indirect => 1,
+            .registers => |registers| @as(u32, @intCast(registers.pieces.len)),
+        });
+    }
+    return result;
+}
+
+fn riscvFloatPieces(arena: std.mem.Allocator, store: *const Store, target: Target, start: Idx, float_bits: u16) std.mem.Allocator.Error!?[]const RegPiece {
+    const Node = struct { idx: Idx, offset: u32 };
+    var pending: std.ArrayList(Node) = .empty;
+    defer pending.deinit(arena);
+    try pending.append(arena, .{ .idx = start, .offset = 0 });
+    var pieces: [2]RegPiece = undefined;
+    var count: usize = 0;
+    var floats: usize = 0;
+    const xlen: u32 = if (target == .riscv32_ilp32) 4 else 8;
+    while (pending.pop()) |node| {
+        const idx = unwrapTransparentUnion(store, node.idx);
+        const lay = store.getLayout(idx);
+        const size = store.layoutSize(lay);
+        if (size == 0) continue;
+        if (lay.tag == .struct_) {
+            const struct_idx = lay.getStruct().idx;
+            var i = store.getStructData(struct_idx).fields.count;
+            while (i > 0) {
+                i -= 1;
+                if (store.getStructFieldIsPadding(struct_idx, i)) continue;
+                try pending.append(arena, .{ .idx = store.getStructFieldLayout(struct_idx, i), .offset = node.offset + store.getStructFieldOffset(struct_idx, i) });
+            }
+            continue;
+        }
+        if (count == 2) return null;
+        const is_float = lay.tag == .scalar and lay.getScalar().tag == .frac and (idx == .f32 or idx == .f64);
+        if (is_float) {
+            if (size * 8 > float_bits) return null;
+            floats += 1;
+        } else {
+            const is_integer = switch (lay.tag) {
+                .scalar => lay.getScalar().tag == .int or lay.getScalar().tag == .opaque_ptr,
+                .box, .box_of_zst, .ptr, .dynamic, .erased_callable => true,
+                .tag_union => if (target == .riscv32_ilp32)
+                    riscv32.classifyType(store, idx) == .scalar
+                else
+                    riscv64.classifyType(store, idx) == .scalar,
+                else => false,
+            };
+            if (!is_integer or size > xlen) return null;
+        }
+        pieces[count] = .{ .class = if (is_float) .float else .integer, .offset = node.offset, .size = @intCast(size) };
+        count += 1;
+    }
+    if (floats == 0 or count - floats > 1) return null;
+    return try arena.dupe(RegPiece, pieces[0..count]);
 }
 
 // LP64 keeps the same LLVM signature when named arguments exhaust registers;
@@ -1708,4 +1877,26 @@ test "riscv32 ILP32 call plans preserve widths and indirect results" {
     try std.testing.expect(plan.args[5] == .indirect);
     try std.testing.expect(plan.args[6] == .indirect);
     try std.testing.expect(plan.ret == .indirect);
+}
+
+test "RISC-V hardware float ABIs use FP aggregates and respect register exhaustion" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for ([_]Target{ .riscv32_ilp32d, .riscv64_lp64d }) |target| {
+        var store = try Store.init(std.testing.allocator, if (target == .riscv32_ilp32d) .u32 else .u64);
+        defer store.deinit();
+        const pair = try testStruct(&store, &.{ .f64, .f64 });
+        const mixed = try testStruct(&store, &.{ .f32, .i32 });
+        const plan = try lower(arena, &store, target, &.{ pair, mixed }, pair, false);
+        try std.testing.expectEqual(RegClass.float, plan.ret.registers.pieces[0].class);
+        try std.testing.expectEqual(@as(usize, 2), plan.ret.registers.pieces.len);
+        try std.testing.expectEqual(RegClass.float, plan.args[0].registers.pieces[1].class);
+        const exhausted = try lower(arena, &store, target, &.{ .f64, .f64, .f64, .f64, .f64, .f64, .f64, mixed, mixed }, .f64, false);
+        try std.testing.expectEqual(RegClass.integer, exhausted.args[8].registers.pieces[0].class);
+        const single_target: Target = if (target == .riscv32_ilp32d) .riscv32_ilp32f else .riscv64_lp64f;
+        const single = try lower(arena, &store, single_target, &.{ .f32, .f64 }, .f64, false);
+        try std.testing.expectEqual(RegClass.float, single.args[0].registers.pieces[0].class);
+        try std.testing.expectEqual(RegClass.integer, single.args[1].registers.pieces[0].class);
+    }
 }
