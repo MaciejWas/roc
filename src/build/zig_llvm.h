@@ -121,6 +121,8 @@ ZIG_EXTERN_C bool ZigLLVMTargetMachineEmitObjectToMemory(LLVMTargetMachineRef ta
 
 ZIG_EXTERN_C void ZigLLVMFreeEmittedObject(char *bytes);
 
+ZIG_EXTERN_C void ZigLLVMSetTargetAbi(LLVMModuleRef module_ref, const char *abi);
+
 ZIG_EXTERN_C void ZigLLVMRunGlobalDCE(LLVMModuleRef module_ref);
 
 ZIG_EXTERN_C LLVMTargetMachineRef ZigLLVMCreateTargetMachine(LLVMTargetRef T, const char *Triple,

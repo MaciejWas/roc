@@ -158,6 +158,7 @@ pub const CompositionSite = extern struct {
     entry: ?*const CompositionEntry = null,
 
     pub fn load(self: *const CompositionSite) ?*const CompositionEntry {
+        if (comptime serialized) return self.entry;
         return @atomicLoad(?*const CompositionEntry, &self.entry, .acquire);
     }
 
@@ -177,7 +178,11 @@ pub const CompositionSite = extern struct {
             @memcpy(@constCast(fresh.operands(operands.len)), operands);
             break :blk @ptrCast(cache.intern(key, @ptrCast(@alignCast(fresh)), ops));
         };
-        @atomicStore(?*const CompositionEntry, &self.entry, entry, .release);
+        if (comptime serialized) {
+            self.entry = entry;
+        } else {
+            @atomicStore(?*const CompositionEntry, &self.entry, entry, .release);
+        }
     }
 };
 
@@ -213,9 +218,35 @@ pub fn recursiveIsOpen(desc: *const TypeDesc) bool {
 /// stays alive (immortal, like everything here), so a reader holding it sees
 /// a consistent, possibly stale, table and a miss there retries under the
 /// lock against the current one. Only insertion and growth take the lock.
+// A platform build on a native freestanding target executes under the
+// platform's recursive runtime lock. Compiler-internal runtimes are concurrent.
+const serialized = builtins.host_abi.host_role == .platform and
+    builtin.os.tag == .freestanding and !builtin.cpu.arch.isWasm();
+
+fn RuntimeValue(comptime T: type) type {
+    return struct {
+        raw: T,
+        const Self = @This();
+        fn init(value: T) Self {
+            return .{ .raw = value };
+        }
+        fn load(self: *const Self, comptime order: std.builtin.AtomicOrder) T {
+            if (comptime serialized) return self.raw;
+            return @atomicLoad(T, &self.raw, order);
+        }
+        fn store(self: *Self, value: T, comptime order: std.builtin.AtomicOrder) void {
+            if (comptime serialized) {
+                self.raw = value;
+                return;
+            }
+            @atomicStore(T, &self.raw, value, order);
+        }
+    };
+}
+
 pub const Cache = struct {
     lock: std.atomic.Value(u32) = .init(0),
-    table: std.atomic.Value(?*const Table) = .init(null),
+    table: RuntimeValue(?*const Table) = .init(null),
     len: u32 = 0,
 
     const Table = struct {
@@ -230,16 +261,18 @@ pub const Cache = struct {
         key_len: u32,
         /// Written last with release ordering: a reader that sees it sees
         /// the key words it was stored under.
-        value: std.atomic.Value(?*const TypeDesc),
+        value: RuntimeValue(?*const TypeDesc),
     };
 
     fn acquire(self: *Cache) void {
+        if (comptime serialized) return;
         while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
             std.atomic.spinLoopHint();
         }
     }
 
     fn release(self: *Cache) void {
+        if (comptime serialized) return;
         self.lock.store(0, .release);
     }
 

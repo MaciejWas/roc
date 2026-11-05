@@ -89,6 +89,8 @@ pub const CompileConfig = struct {
     output_path: []const u8,
     optimization: OptimizationLevel,
     target: target.RocTarget,
+    riscv: ?@import("roc_target").riscv.Config = null,
+    boxy_runtime: bool = false,
     report_config: reporting.ReportingConfig,
     cpu: []const u8 = "",
     features: []const u8 = "",
@@ -199,6 +201,7 @@ const LLVMRelocPIC: c_int = 2;
 // LLVM Code Models
 const LLVMCodeModelDefault: c_int = 0;
 const LLVMCodeModelMedium: c_int = 5;
+const LLVMCodeModelSmall: c_int = 3;
 
 // External C functions from zig_llvm.cpp and LLVM C API - only available when LLVM is enabled
 const llvm_externs = if (llvm_available) struct {
@@ -246,6 +249,7 @@ const llvm_externs = if (llvm_available) struct {
     extern fn LLVMParseBitcode(mem_buf: ?*anyopaque, out_module: *?*anyopaque, out_message: *[*:0]u8) c_int;
     extern fn LLVMDisposeMemoryBuffer(mem_buf: ?*anyopaque) void;
     extern fn LLVMDisposeModule(module: ?*anyopaque) void;
+    extern fn ZigLLVMSetTargetAbi(module: ?*anyopaque, abi: [*:0]const u8) void;
     extern fn LLVMDisposeTargetMachine(target_machine: ?*anyopaque) void;
     extern fn LLVMSetTarget(module: ?*anyopaque, triple: [*:0]const u8) void;
     // Functions for linking builtin bitcode into the app module so the optimizer
@@ -311,7 +315,7 @@ const llvm_embedded = if (llvm_available) @import("llvm_embedded") else struct {
     pub const sha256_aarch64_sha2_bc: []const u8 = "";
     pub const PrivateRuntime = struct { target: target.RocTarget, bitcode: []const u8 };
     pub const private_runtimes = [_]PrivateRuntime{};
-    pub const BuiltinRuntime = struct { target: target.RocTarget, full: []const u8, core: []const u8 };
+    pub const BuiltinRuntime = struct { target: target.RocTarget, full: []const u8, core: []const u8, boxy: []const u8 };
     pub const builtin_runtimes = [_]BuiltinRuntime{};
 };
 
@@ -477,8 +481,8 @@ fn privateRuntimeBitcode(runtime_target: target.RocTarget) []const u8 {
     unreachable; // build.zig embeds a runtime for every target llvmPrivateRuntimeTarget names
 }
 
-fn isPrivateRuntimeRoutine(name: []const u8) bool {
-    for (builtins.shim_symbols.llvm_private_runtime_set) |routine| {
+fn isPrivateRuntimeRoutine(name: []const u8, routines: []const [:0]const u8) bool {
+    for (routines) |routine| {
         if (std.mem.eql(u8, name, routine)) return true;
     }
     return false;
@@ -492,7 +496,8 @@ fn isPrivateRuntimeRoutine(name: []const u8) bool {
 /// references none of them, so each call the code generator emits binds to
 /// the object's own definition. Everything else in the runtime is internal
 /// before linking and remains only where a routine uses it.
-fn linkPrivateRuntime(module: ?*anyopaque, bitcode: []const u8, target_triple_z: [*:0]const u8) bool {
+fn linkPrivateRuntime(module: ?*anyopaque, bitcode: []const u8, target_triple_z: [*:0]const u8, riscv: bool) bool {
+    const routines: []const [:0]const u8 = if (riscv) &builtins.shim_symbols.riscv_private_runtime_set else &builtins.shim_symbols.llvm_private_runtime_set;
     const externs = llvm_externs;
     const buffer = externs.LLVMCreateMemoryBufferWithMemoryRangeCopy(bitcode.ptr, bitcode.len, "roc-llvm-private-runtime-bc");
     var runtime_module: ?*anyopaque = null;
@@ -509,16 +514,16 @@ fn linkPrivateRuntime(module: ?*anyopaque, bitcode: []const u8, target_triple_z:
         // target machine supplies the CPU this object is built for.
         externs.LLVMRemoveStringAttributeAtIndex(fv, LLVMAttributeFunctionIndex, "target-features", "target-features".len);
         externs.LLVMRemoveStringAttributeAtIndex(fv, LLVMAttributeFunctionIndex, "target-cpu", "target-cpu".len);
-        if (!isPrivateRuntimeRoutine(valueName(fv))) externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
+        if (!isPrivateRuntimeRoutine(valueName(fv), routines)) externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
     }
     var global = externs.LLVMGetFirstGlobal(runtime_module);
     while (global) |gv| : (global = externs.LLVMGetNextGlobal(gv)) {
         if (externs.LLVMIsDeclaration(gv) != 0) continue;
-        if (!isPrivateRuntimeRoutine(valueName(gv))) externs.LLVMSetLinkage(gv, LLVMInternalLinkage);
+        if (!isPrivateRuntimeRoutine(valueName(gv), routines)) externs.LLVMSetLinkage(gv, LLVMInternalLinkage);
     }
     var alias = externs.LLVMGetFirstGlobalAlias(runtime_module);
     while (alias) |av| : (alias = externs.LLVMGetNextGlobalAlias(av)) {
-        if (!isPrivateRuntimeRoutine(valueName(av))) externs.LLVMSetLinkage(av, LLVMInternalLinkage);
+        if (!isPrivateRuntimeRoutine(valueName(av), routines)) externs.LLVMSetLinkage(av, LLVMInternalLinkage);
     }
     externs.ZigLLVMRunGlobalDCE(runtime_module);
 
@@ -527,9 +532,9 @@ fn linkPrivateRuntime(module: ?*anyopaque, bitcode: []const u8, target_triple_z:
     if (externs.LLVMLinkModules2(module, runtime_module) != 0) return false;
 
     std.debug.assert(externs.LLVMGetNamedGlobal(module, "llvm.compiler.used") == null);
-    var kept: [builtins.shim_symbols.llvm_private_runtime_set.len]?*anyopaque = undefined;
+    var kept: [builtins.shim_symbols.riscv_private_runtime_set.len]?*anyopaque = undefined;
     var kept_len: usize = 0;
-    for (builtins.shim_symbols.llvm_private_runtime_set) |routine| {
+    for (routines) |routine| {
         const definition = externs.LLVMGetNamedFunction(module, routine.ptr) orelse
             externs.LLVMGetNamedGlobal(module, routine.ptr) orelse
             externs.LLVMGetNamedGlobalAlias(module, routine.ptr, routine.len) orelse
@@ -562,24 +567,6 @@ pub fn initializeLLVM() void {
     }
     const externs = llvm_externs;
     externs.ZigLLVMInitializeAllTargets();
-}
-
-/// Platform entry points into the builtin runtime are roots even when Roc
-/// itself never calls them: their callers live in the separately linked host.
-fn isPlatformRuntimeExport(roc_target: target.RocTarget, linked: LinkedBuiltins, name: []const u8) bool {
-    return roc_target.runtimeAbi() == .task_local and linked.host_call_extern and linked.export_platform_runtime and
-        std.mem.eql(u8, name, builtins.shim_symbols.roc_cleanup_task_state);
-}
-
-test "FreeRTOS task cleanup is public only for RISC-V platform output" {
-    const linked: LinkedBuiltins = .{ .host_call_extern = true, .export_platform_runtime = true, .sha256_rounds = .portable };
-    const name = builtins.shim_symbols.roc_cleanup_task_state;
-    try std.testing.expect(isPlatformRuntimeExport(.riscv64elf, linked, name));
-    try std.testing.expect(!isPlatformRuntimeExport(.wasm32, linked, name));
-    try std.testing.expect(!isPlatformRuntimeExport(.x64musl, linked, name));
-    try std.testing.expect(!isPlatformRuntimeExport(.riscv64elf, .{ .host_call_extern = false, .sha256_rounds = .portable }, name));
-    try std.testing.expect(!isPlatformRuntimeExport(.riscv64elf, linked, "roc_alloc"));
-    try std.testing.expect(!isPlatformRuntimeExport(.riscv64elf, .{ .host_call_extern = true, .sha256_rounds = .portable }, name));
 }
 
 /// Compile LLVM bitcode file to object file
@@ -736,11 +723,25 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
                 externs.LLVMDeleteGlobal(compiler_used);
             }
 
+            if (config.boxy_runtime and config.riscv != null) {
+                const runtime_target = config.target.llvmBuiltinRuntimeTarget().?;
+                const boxy_bitcode = for (llvm_embedded.builtin_runtimes) |runtime| {
+                    if (runtime.target == runtime_target) break runtime.boxy;
+                } else unreachable; // build.zig embeds each declared RISC-V runtime
+                const boxy_buffer = externs.LLVMCreateMemoryBufferWithMemoryRangeCopy(boxy_bitcode.ptr, boxy_bitcode.len, "roc-boxy-runtime-bc");
+                var boxy_module: ?*anyopaque = null;
+                if (externs.LLVMParseBitcode2(boxy_buffer, &boxy_module) != 0) return false;
+                externs.LLVMSetTarget(boxy_module, target_triple_z.ptr);
+                externs.LLVMSetDataLayout(boxy_module, externs.LLVMGetDataLayoutStr(builtins_module));
+                if (externs.LLVMLinkModules2(builtins_module, boxy_module) != 0) return false;
+                if (externs.LLVMGetNamedGlobal(builtins_module, "llvm.used")) |used| externs.LLVMDeleteGlobal(used);
+                if (externs.LLVMGetNamedGlobal(builtins_module, "llvm.compiler.used")) |used| externs.LLVMDeleteGlobal(used);
+            }
             var builtin_alias = externs.LLVMGetFirstGlobalAlias(builtins_module);
             while (builtin_alias) |a| : (builtin_alias = externs.LLVMGetNextGlobalAlias(a)) {
                 var name_len: usize = 0;
                 const name_ptr = externs.LLVMGetValueName2(a, &name_len);
-                if (!app_decls.contains(name_ptr[0..name_len]) and !isPlatformRuntimeExport(config.target, linked_builtins, name_ptr[0..name_len])) {
+                if (!app_decls.contains(name_ptr[0..name_len])) {
                     externs.LLVMSetLinkage(a, LLVMInternalLinkage);
                 }
             }
@@ -798,7 +799,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
                     externs.LLVMAddAttributeAtIndex(fv, LLVMAttributeFunctionIndex, inlinehint_attr);
                 }
 
-                if (!app_decls.contains(name) and !isPlatformRuntimeExport(config.target, linked_builtins, name)) {
+                if (!app_decls.contains(name)) {
                     externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
                 }
             }
@@ -821,7 +822,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
                 while (alias) |a| : (alias = externs.LLVMGetNextGlobalAlias(a)) {
                     var name_len: usize = 0;
                     const name_ptr = externs.LLVMGetValueName2(a, &name_len);
-                    if (app_defs.contains(name_ptr[0..name_len]) or isPlatformRuntimeExport(config.target, linked_builtins, name_ptr[0..name_len])) continue;
+                    if (app_defs.contains(name_ptr[0..name_len])) continue;
                     if (externs.LLVMAliasGetAliasee(a)) |aliasee| {
                         externs.LLVMReplaceAllUsesWith(a, aliasee);
                     }
@@ -839,8 +840,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
                         // machine still controls CPU/features at codegen.
                         externs.LLVMRemoveStringAttributeAtIndex(fv, LLVMAttributeFunctionIndex, "target-features", "target-features".len);
                         externs.LLVMRemoveStringAttributeAtIndex(fv, LLVMAttributeFunctionIndex, "target-cpu", "target-cpu".len);
-                        if (!isPlatformRuntimeExport(config.target, linked_builtins, name_ptr[0..name_len]))
-                            externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
+                        externs.LLVMSetLinkage(fv, LLVMInternalLinkage);
                     }
                 }
 
@@ -877,7 +877,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
 
     if (config.private_runtime) {
         if (config.target.llvmPrivateRuntimeTarget()) |runtime_target| {
-            if (!linkPrivateRuntime(module, privateRuntimeBitcode(runtime_target), target_triple_z.ptr)) {
+            if (!linkPrivateRuntime(module, privateRuntimeBitcode(runtime_target), target_triple_z.ptr, config.riscv != null)) {
                 std.log.err("Failed to link the LLVM private runtime for {s}", .{@tagName(runtime_target)});
                 return false;
             }
@@ -900,6 +900,8 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
             externs.LLVMAddAttributeAtIndex(fv, LLVMAttributeFunctionIndex, minsize_attr);
         }
     }
+
+    if (config.riscv) |contract| externs.ZigLLVMSetTargetAbi(module, @tagName(contract.abi).ptr);
 
     // 5. Create target
     std.log.debug("Getting LLVM target for triple: {s}", .{target_triple});
@@ -927,7 +929,10 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
         if (config.pic) LLVMRelocPIC else LLVMRelocDefault,
         // RISC-V firmware may be linked anywhere within one 2 GiB window,
         // including QEMU virt RAM at 0x80000000, outside medlow addressing.
-        switch (config.target.llvmCodeModel()) {
+        if (config.riscv) |contract| switch (contract.code_model) {
+            .medlow => LLVMCodeModelSmall,
+            .medany => LLVMCodeModelMedium,
+        } else switch (config.target.llvmCodeModel()) {
             .default => LLVMCodeModelDefault,
             .medium => LLVMCodeModelMedium,
             else => unreachable, // Roc target metadata only selects default and medium
@@ -935,7 +940,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
         true, // function_sections
         true, // data_sections
         .ZigLLVMABITypeDefault, // float_abi
-        null, // abi_name
+        if (config.riscv) |contract| @tagName(contract.abi).ptr else null, // abi_name
         false, // emulated_tls
     );
     if (target_machine == null) {

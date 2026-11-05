@@ -92,14 +92,12 @@ pub const roc_dbg = "roc_dbg";
 pub const roc_expect_failed = "roc_expect_failed";
 /// Crash callback in the fixed runtime set every host defines.
 pub const roc_crashed = "roc_crashed";
-/// Native FreeRTOS platform's opaque current-task state callbacks.
-/// This is additional to runtime_set; other targets provide their own storage.
-pub const roc_get_task_state = "roc_get_task_state";
-pub const roc_set_task_state = "roc_set_task_state";
-pub const roc_cleanup_task_state = "roc_cleanup_task_state";
+
+/// Platform-provided recursive execution lock for native freestanding output.
+/// The platform may implement empty functions only with exclusive access.
 pub const roc_acquire_runtime_lock = "roc_acquire_runtime_lock";
 pub const roc_release_runtime_lock = "roc_release_runtime_lock";
-pub const freestanding_runtime_set = runtime_set ++ [_][:0]const u8{ roc_get_task_state, roc_set_task_state, roc_acquire_runtime_lock, roc_release_runtime_lock };
+pub const freestanding_runtime_set = runtime_set ++ [_][:0]const u8{ roc_acquire_runtime_lock, roc_release_runtime_lock };
 
 /// The fixed runtime symbols every symbol-ABI host defines, in
 /// `host_abi.extern_host` declaration order.
@@ -160,6 +158,128 @@ pub const llvm_private_runtime_set = c_memory_set ++ c_math_set ++ [_][:0]const 
     // x64 MinGW.
     "__chkstk",
     "___chkstk_ms",
+};
+
+/// Additional code-generator libcalls for RISC-V targets without M/F/D.
+pub const riscv_private_runtime_set = llvm_private_runtime_set ++ [_][:0]const u8{
+    // RISC-V integer and software floating-point legalization libcalls.
+    "__ashldi3",
+    "__ashlti3",
+    "__ashrdi3",
+    "__ashrti3",
+    "__lshrdi3",
+    "__lshrti3",
+    "__mulsi3",
+    "__muldi3",
+    "__multi3",
+    "__divsi3",
+    "__divdi3",
+    "__divti3",
+    "__udivsi3",
+    "__udivdi3",
+    "__udivti3",
+    "__modsi3",
+    "__moddi3",
+    "__modti3",
+    "__umodsi3",
+    "__umoddi3",
+    "__umodti3",
+    "__udivmodsi4",
+    "__udivmoddi4",
+    "__udivmodti4",
+    "__clzsi2",
+    "__clzdi2",
+    "__clzti2",
+    "__ctzsi2",
+    "__ctzdi2",
+    "__ctzti2",
+    "__popcountsi2",
+    "__popcountdi2",
+    "__popcountti2",
+    "__paritysi2",
+    "__paritydi2",
+    "__parityti2",
+    "__cmpsi2",
+    "__cmpdi2",
+    "__cmpti2",
+    "__ucmpsi2",
+    "__ucmpdi2",
+    "__ucmpti2",
+    "__addsf3",
+    "__adddf3",
+    "__addtf3",
+    "__subsf3",
+    "__subdf3",
+    "__subtf3",
+    "__mulsf3",
+    "__muldf3",
+    "__multf3",
+    "__divsf3",
+    "__divdf3",
+    "__divtf3",
+    "__eqsf2",
+    "__eqdf2",
+    "__eqtf2",
+    "__nesf2",
+    "__nedf2",
+    "__netf2",
+    "__ltsf2",
+    "__ltdf2",
+    "__lttf2",
+    "__lesf2",
+    "__ledf2",
+    "__letf2",
+    "__gtsf2",
+    "__gtdf2",
+    "__gttf2",
+    "__gesf2",
+    "__gedf2",
+    "__getf2",
+    "__unordsf2",
+    "__unorddf2",
+    "__unordtf2",
+    "__fixsfsi",
+    "__fixunssfsi",
+    "__floatsisf",
+    "__floatunsisf",
+    "__fixsfdi",
+    "__fixunssfdi",
+    "__floatdisf",
+    "__floatundisf",
+    "__fixsfti",
+    "__fixunssfti",
+    "__floattisf",
+    "__floatuntisf",
+    "__fixdfsi",
+    "__fixunsdfsi",
+    "__floatsidf",
+    "__floatunsidf",
+    "__fixdfdi",
+    "__fixunsdfdi",
+    "__floatdidf",
+    "__floatundidf",
+    "__fixdfti",
+    "__fixunsdfti",
+    "__floattidf",
+    "__floatuntidf",
+    "__fixtfsi",
+    "__fixunstfsi",
+    "__floatsitf",
+    "__floatunsitf",
+    "__fixtfdi",
+    "__fixunstfdi",
+    "__floatditf",
+    "__floatunditf",
+    "__fixtfti",
+    "__fixunstfti",
+    "__floattitf",
+    "__floatuntitf",
+    "__extendsfdf2",
+    "__extendsftf2",
+    "__extenddftf2",
+    "__truncdfsf2",
+    "__trunctfsf2",
+    "__trunctfdf2",
 };
 
 /// Export the six fixed host callbacks using canonical names. Callback types

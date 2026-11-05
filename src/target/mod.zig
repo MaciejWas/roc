@@ -6,16 +6,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Platform-owned RISC-V instruction, ABI, and code-model settings.
+pub const riscv = @import("riscv.zig");
+
 /// Platform callbacks required in addition to the common six-symbol host ABI.
 pub const RuntimeAbi = enum {
     standard,
-    /// Per-task state and a platform-wide recursive execution lock.
-    task_local,
+    /// Platform-wide recursive execution lock; state is frame-owned.
+    platform_serialized,
 };
 
 /// Runtime ABI for a resolved target, including compiler-internal targets.
 pub fn runtimeAbiForTarget(arch: std.Target.Cpu.Arch, os: std.Target.Os.Tag) RuntimeAbi {
-    return if (os == .freestanding and !arch.isWasm()) .task_local else .standard;
+    return if (os == .freestanding and !arch.isWasm()) .platform_serialized else .standard;
 }
 
 /// CPU architecture categories used by Roc's target-selection logic.
@@ -717,7 +720,7 @@ pub const RocTarget = enum {
     pub fn llvmBuiltinRuntimeTarget(self: RocTarget) ?RocTarget {
         return switch (self.runtimeAbi()) {
             .standard => null,
-            .task_local => self.defaultCpuTarget(),
+            .platform_serialized => self.defaultCpuTarget(),
         };
     }
 
@@ -777,9 +780,11 @@ pub const RocTarget = enum {
             .arm64v1linux,
             .arm64v1musl,
             .arm64v1glibc,
+            .riscv32elf,
+            .riscv64elf,
             => self.defaultCpuTarget(),
 
-            .arm32linux, .arm32musl, .wasm32, .wasm32v1, .riscv32elf, .riscv64elf => null,
+            .arm32linux, .arm32musl, .wasm32, .wasm32v1 => null,
         };
     }
 
@@ -1415,7 +1420,7 @@ test "LLVM runtime policy is explicit for every Roc target" {
     for (std.enums.values(RocTarget)) |target| {
         if (target == .riscv32elf or target == .riscv64elf) {
             try std.testing.expect(target.supportsLlvm());
-            try std.testing.expectEqual(RuntimeAbi.task_local, target.runtimeAbi());
+            try std.testing.expectEqual(RuntimeAbi.platform_serialized, target.runtimeAbi());
             try std.testing.expectEqual(target, target.llvmBuiltinRuntimeTarget().?);
             try std.testing.expectEqual(std.builtin.CodeModel.medium, target.llvmCodeModel());
         } else {
@@ -1435,4 +1440,8 @@ test "riscv32elf metadata and RV32I CPU contract" {
     var expected = std.Target.riscv.featureSet(&.{ .@"32bit", .i });
     expected.populateDependencies(std.Target.Cpu.Arch.riscv32.allFeaturesList());
     try std.testing.expect(target.llvmTargetFeatures().eql(expected));
+}
+
+test "RISC-V platform configuration declarations" {
+    std.testing.refAllDecls(riscv);
 }

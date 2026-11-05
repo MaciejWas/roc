@@ -2882,16 +2882,12 @@ generate_runtime_symbol_externs_rust =
 	\\    /// Must never return: end the process. Roc code traps right after this
 	\\    /// call, so returning terminates the process.
 	\\    pub fn roc_crashed(bytes: *const u8, len: usize);
-	\\    // Native freestanding task-local pointer callbacks; initially null.
-	\\    pub fn roc_get_task_state() -> *mut c_void;
-	\\    pub fn roc_set_task_state(state: *mut c_void);
-	\\    // One shared recursive mutex; acquire waits until owned.
+	\\    // One platform-provided recursive execution lock; acquire waits until owned.
 	\\// Native freestanding hosts must hold it for all Roc value operations,
 	\\// including retain/release and uniqueness checks outside Roc calls.
 	\\    pub fn roc_acquire_runtime_lock();
 	\\    pub fn roc_release_runtime_lock();
-	\\    // Runtime cleanup, called outside Roc before task deletion.
-	\\    pub fn roc_cleanup_task_state();
+
 	\\}
 	\\
 	\\extern "C" fn direct_roc_alloc(_host: *mut RocHost, length: usize, alignment: usize) -> NonNull<c_void> {

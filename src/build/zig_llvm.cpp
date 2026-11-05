@@ -298,6 +298,13 @@ static SanitizerCoverageOptions getSanCovOptions(ZigLLVMCoverageOptions z) {
     return o;
 }
 
+// The frontend commits the platform-facing C carriers. Builtin payloads keep
+// their internal IR signatures; commit the output ABI flag before emission.
+ZIG_EXTERN_C void ZigLLVMSetTargetAbi(LLVMModuleRef module_ref, const char *abi) {
+    Module &module = *unwrap(module_ref);
+    module.setModuleFlag(Module::Override, "target-abi", MDString::get(module.getContext(), abi));
+}
+
 ZIG_EXTERN_C void ZigLLVMRunGlobalDCE(LLVMModuleRef module_ref) {
     Module &llvm_module = *unwrap(module_ref);
 

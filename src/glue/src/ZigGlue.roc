@@ -2392,16 +2392,12 @@ generate_runtime_symbol_externs =
 	\\/// Must never return: end the process, or longjmp out of the Roc code that called
 	\\/// it. Roc code traps right after this call, so returning terminates the process.
 	\\pub extern fn roc_crashed(bytes: [*]const u8, len: usize) callconv(.c) void;
-	\\/// Native freestanding task-local pointer callbacks; initially null.
-	\\pub extern fn roc_get_task_state() callconv(.c) ?*anyopaque;
-	\\pub extern fn roc_set_task_state(state: ?*anyopaque) callconv(.c) void;
-	\\/// One shared recursive mutex; acquire waits until owned.
+	\\/// One platform-provided recursive execution lock; acquire waits until owned.
 	\\/// Native freestanding hosts must hold it for all Roc value operations,
 	\\/// including retain/release and uniqueness checks outside Roc calls.
 	\\pub extern fn roc_acquire_runtime_lock() callconv(.c) void;
 	\\pub extern fn roc_release_runtime_lock() callconv(.c) void;
-	\\/// Runtime cleanup, called outside Roc before task deletion.
-	\\pub extern fn roc_cleanup_task_state() callconv(.c) void;
+
 	\\
 
 ## Generate direct extern declarations for hosted symbols.

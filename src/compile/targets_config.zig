@@ -223,6 +223,9 @@ pub const TargetConfigField = enum {
     output,
     linker_script,
     entry_point,
+    isa,
+    abi,
+    code_model,
     exports,
     import_memory,
     minimum_memory,
@@ -236,6 +239,9 @@ pub const TargetConfigField = enum {
             .{ "output", .output },
             .{ "linker_script", .linker_script },
             .{ "entry_point", .entry_point },
+            .{ "isa", .isa },
+            .{ "abi", .abi },
+            .{ "code_model", .code_model },
             .{ "exports", .exports },
             .{ "import_memory", .import_memory },
             .{ "minimum_memory", .minimum_memory },
@@ -256,7 +262,7 @@ pub const TargetConfigField = enum {
     /// wasm target.
     pub fn wasmOnly(self: TargetConfigField) bool {
         return switch (self) {
-            .inputs, .output, .linker_script, .entry_point => false,
+            .inputs, .output, .linker_script, .entry_point, .isa, .abi, .code_model => false,
             .exports, .import_memory, .minimum_memory, .maximum_memory, .initial_stack_size, .global_base => true,
         };
     }
@@ -268,6 +274,11 @@ pub const TargetEntryProblem = enum {
     duplicate_field,
     wasm_only_field,
     elf_executable_only_field,
+    riscv_only_field,
+    invalid_riscv_isa,
+    invalid_riscv_abi,
+    invalid_riscv_code_model,
+    incompatible_riscv_abi,
     expected_nonempty_string,
     unknown_input,
     expected_input_files,
@@ -304,6 +315,11 @@ pub const InvalidTargetEntryDiagnostic = struct {
             .duplicate_field => try std.fmt.allocPrint(allocator, "The {s} target sets `{s}` more than once.", .{ target_name, self.field_name }),
             .wasm_only_field => try std.fmt.allocPrint(allocator, "The {s} target sets `{s}`, which only applies to WebAssembly targets.", .{ target_name, self.field_name }),
             .elf_executable_only_field => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` only applies to ELF executables.", .{ target_name, self.field_name }),
+            .riscv_only_field => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` only applies to RISC-V ELF targets.", .{ target_name, self.field_name }),
+            .invalid_riscv_isa => try std.fmt.allocPrint(allocator, "The {s} target's `isa` must name a supported ISA of the same width, for example rv32imc or rv64imac.", .{target_name}),
+            .invalid_riscv_abi => try std.fmt.allocPrint(allocator, "The {s} target's `abi` must be Ilp32, Ilp32f, Ilp32d, Lp64, Lp64f, or Lp64d.", .{target_name}),
+            .invalid_riscv_code_model => try std.fmt.allocPrint(allocator, "The {s} target's `code_model` must be Medlow or Medany.", .{target_name}),
+            .incompatible_riscv_abi => try std.fmt.allocPrint(allocator, "The {s} target's ABI must match its width and its floating-point extensions (F for *f, F and D for *d).", .{target_name}),
             .expected_nonempty_string => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` must be a non-empty string without NUL bytes.", .{ target_name, self.field_name }),
             .unknown_input => try std.fmt.allocPrint(allocator, "The {s} target's inputs include `{s}`, which is not a known input.", .{ target_name, self.field_name }),
             .expected_input_files => try std.fmt.allocPrint(allocator, "The {s} target's `{s}` must be a list of input files.", .{ target_name, self.field_name }),
@@ -320,7 +336,7 @@ pub const InvalidTargetEntryDiagnostic = struct {
         errdefer report.deinit();
         switch (self.problem) {
             .unknown_field => try report.document.addReflowingTextWithBackticks(
-                "A target's fields are `inputs` and `output`, on ELF executables also `linker_script` and `entry_point`, and on WebAssembly targets also `exports`, `import_memory`, `minimum_memory`, `maximum_memory`, `initial_stack_size`, and `global_base`.",
+                "RISC-V targets also accept `isa`, `abi`, and `code_model`. A target's fields are `inputs` and `output`, on ELF executables also `linker_script` and `entry_point`, and on WebAssembly targets also `exports`, `import_memory`, `minimum_memory`, `maximum_memory`, `initial_stack_size`, and `global_base`.",
             ),
             .unknown_input => try report.document.addReflowingTextWithBackticks(
                 "Each input is a file path string, `app` for the compiled application, or `win_gui`.",
@@ -328,6 +344,11 @@ pub const InvalidTargetEntryDiagnostic = struct {
             .duplicate_field,
             .wasm_only_field,
             .elf_executable_only_field,
+            .riscv_only_field,
+            .invalid_riscv_isa,
+            .invalid_riscv_abi,
+            .invalid_riscv_code_model,
+            .incompatible_riscv_abi,
             .expected_nonempty_string,
             .expected_input_files,
             .expected_output_kind,
@@ -388,6 +409,8 @@ pub const TargetLinkSpec = struct {
     items: []const LinkItem,
     wasm: ?WasmTargetConfig = null,
     elf: ?ElfTargetConfig = null,
+    /// Fully resolved hardware contract; present for every RISC-V target.
+    riscv: ?roc_target.riscv.Config = null,
 
     fn hasDeclaredTargetFiles(self: TargetLinkSpec) bool {
         if (self.elf) |elf| if (elf.linker_script != null) return true;
@@ -702,6 +725,7 @@ pub const TargetsConfig = struct {
         output: OutputKind,
         wasm: ?WasmTargetConfig,
         elf: ?ElfTargetConfig,
+        riscv: ?roc_target.riscv.Config,
     };
 
     /// Parse one target entry's config record. Every field must be a known
@@ -725,6 +749,11 @@ pub const TargetsConfig = struct {
         errdefer wasm.deinit(allocator);
         var elf = ElfTargetConfig{};
         errdefer elf.deinit(allocator);
+        var riscv: ?roc_target.riscv.Config = switch (target.toCpuArch()) {
+            .riscv32, .riscv64 => roc_target.riscv.Config.baseline(target.ptrBitWidth()),
+            else => null,
+        };
+        var abi_region: base.Region = .zero();
         var seen: std.EnumSet(TargetConfigField) = .empty;
 
         for (entries) |entry_idx| {
@@ -755,7 +784,26 @@ pub const TargetsConfig = struct {
             // The parser has already reported a malformed value.
             if (value == .malformed) continue;
 
+            if ((field == .isa or field == .abi or field == .code_model) and riscv == null)
+                return reject(diagnostic, .riscv_only_field, target, name, name_region);
             switch (field) {
+                .isa => {
+                    if (value != .string_literal) return reject(diagnostic, .invalid_riscv_isa, target, name, name_region);
+                    const token = value.string_literal orelse return reject(diagnostic, .invalid_riscv_isa, target, name, name_region);
+                    riscv.?.features = roc_target.riscv.Config.parseIsa(target.ptrBitWidth(), ast.resolve(token)) catch
+                        return reject(diagnostic, .invalid_riscv_isa, target, name, name_region);
+                },
+                .abi => {
+                    if (value != .tag_literal) return reject(diagnostic, .invalid_riscv_abi, target, name, name_region);
+                    riscv.?.abi = roc_target.riscv.Abi.fromTag(ast.resolve(value.tag_literal)) orelse
+                        return reject(diagnostic, .invalid_riscv_abi, target, name, name_region);
+                    abi_region = name_region;
+                },
+                .code_model => {
+                    if (value != .tag_literal) return reject(diagnostic, .invalid_riscv_code_model, target, name, name_region);
+                    riscv.?.code_model = roc_target.riscv.CodeModel.fromTag(ast.resolve(value.tag_literal)) orelse
+                        return reject(diagnostic, .invalid_riscv_code_model, target, name, name_region);
+                },
                 .inputs => {
                     if (value != .files) return reject(diagnostic, .expected_input_files, target, name, name_region);
                     try appendTargetFiles(allocator, store, ast, target, value.files, link_items, diagnostic);
@@ -802,7 +850,7 @@ pub const TargetsConfig = struct {
         for (entries) |entry_idx| {
             const entry = store.getTargetConfigEntry(entry_idx);
             const name = ast.resolve(entry.name);
-            const field = TargetConfigField.fromName(name) orelse unreachable;
+            const field = TargetConfigField.fromName(name) orelse unreachable; // the first pass rejects unknown target fields
             if (field == .linker_script or field == .entry_point) {
                 const elf_target = !target.isWindows() and target.toOsTag() != .macos and target.toCpuArch() != .wasm32;
                 if (!elf_target or output != .exe) {
@@ -812,10 +860,14 @@ pub const TargetsConfig = struct {
             }
         }
 
+        if (riscv) |contract| contract.validate(target.ptrBitWidth()) catch {
+            diagnostic.* = .{ .entry = .{ .problem = .incompatible_riscv_abi, .target = target, .field_name = "abi", .region = abi_region } };
+            return error.InvalidTargetConfig;
+        };
         var has_wasm_config = false;
         var fields = seen.iterator();
         while (fields.next()) |field| has_wasm_config = has_wasm_config or field.wasmOnly();
-        return .{ .output = output, .wasm = if (has_wasm_config) wasm else null, .elf = if (seen.contains(.linker_script) or seen.contains(.entry_point)) elf else null };
+        return .{ .output = output, .wasm = if (has_wasm_config) wasm else null, .elf = if (seen.contains(.linker_script) or seen.contains(.entry_point)) elf else null, .riscv = riscv };
     }
 
     /// Store an unsigned wasm setting written as a literal that fits in `T`,
@@ -890,6 +942,7 @@ pub const TargetsConfig = struct {
                 .items = try link_items.toOwnedSlice(),
                 .wasm = parsed.wasm,
                 .elf = parsed.elf,
+                .riscv = parsed.riscv,
             });
         }
 
@@ -1715,4 +1768,64 @@ test "fromAST rejects malformed ELF settings and escaping scripts" {
     try expectInvalidTargetPath(
         \\        riscv64elf: { inputs: [app], linker_script: "/outside.ld" },
     , .linker_script, .absolute, "/outside.ld");
+}
+
+test "fromAST captures independent RISC-V ISA ABI and code model for archives" {
+    const allocator = testing.allocator;
+    const source =
+        \\platform ""
+        \\    requires { main : {} }
+        \\    exposes []
+        \\    packages {}
+        \\    provides { "roc_main": main_for_host }
+        \\    targets: {
+        \\        riscv32elf: { isa: "rv32imc", abi: Ilp32, code_model: Medlow, inputs: [app], output: Archive },
+        \\        riscv64elf: { abi: Lp64d, isa: "rv64gc", code_model: Medany, inputs: [app], output: Archive },
+        \\    }
+    ;
+    const copy = try allocator.dupe(u8, source);
+    defer allocator.free(copy);
+    var env = try base.CommonEnv.init(allocator, copy);
+    defer env.deinit(allocator);
+    const ast = try parse.file(allocator, &env);
+    defer ast.deinit();
+    try testing.expectEqual(@as(usize, 0), ast.parse_diagnostics.items.len);
+    var diagnostic: TargetsConfigDiagnostic = undefined;
+    const config = (try TargetsConfig.fromAST(allocator, ast, &diagnostic)).?;
+    defer config.deinit(allocator);
+    const rv32 = config.getLinkSpec(.riscv32elf).?;
+    try testing.expectEqual(OutputKind.archive, rv32.output);
+    try testing.expectEqual(roc_target.riscv.Abi.ilp32, rv32.riscv.?.abi);
+    try testing.expectEqual(roc_target.riscv.CodeModel.medlow, rv32.riscv.?.code_model);
+    try testing.expect(!std.Target.riscv.featureSetHas(rv32.riscv.?.features, .a));
+    const rv64 = config.getLinkSpec(.riscv64elf).?.riscv.?;
+    try testing.expectEqual(roc_target.riscv.Abi.lp64d, rv64.abi);
+    try testing.expectEqual(@as(u32, 5), rv64.elfFlags());
+}
+
+test "fromAST rejects unsupported or incompatible RISC-V platform contracts" {
+    try expectInvalidTargetEntry(
+        \\        x64musl: { inputs: [app], isa: "rv32imac" },
+    , .riscv_only_field, .x64musl, "isa");
+    try expectInvalidTargetEntry(
+        \\        riscv32elf: { inputs: [app], isa: "rv64imac" },
+    , .invalid_riscv_isa, .riscv32elf, "isa");
+    try expectInvalidTargetEntry(
+        \\        riscv32elf: { inputs: [app], isa: "rv32ec" },
+    , .invalid_riscv_isa, .riscv32elf, "isa");
+    try expectInvalidTargetEntry(
+        \\        riscv32elf: { inputs: [app], abi: Lp64 },
+    , .incompatible_riscv_abi, .riscv32elf, "abi");
+    try expectInvalidTargetEntry(
+        \\        riscv32elf: { inputs: [app], isa: "rv32imac", abi: Ilp32f },
+    , .incompatible_riscv_abi, .riscv32elf, "abi");
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], abi: Unknown },
+    , .invalid_riscv_abi, .riscv64elf, "abi");
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], code_model: "medany" },
+    , .invalid_riscv_code_model, .riscv64elf, "code_model");
+    try expectInvalidTargetEntry(
+        \\        riscv64elf: { inputs: [app], isa: "rv64i", isa: "rv64imac" },
+    , .duplicate_field, .riscv64elf, "isa");
 }

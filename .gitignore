@@ -225,3 +225,6 @@ plan.md
 
 # Boxy status report—local planning doc, not committed
 report.md
+
+# Source fixture for the RISC-V platform execution tests.
+!test/riscv/platform/startup.S
