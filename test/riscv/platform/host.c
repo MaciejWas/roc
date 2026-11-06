@@ -72,3 +72,9 @@ void firmware_main(void) {
  * support must remain private and may not satisfy these references. */
 void *memcpy(void *d, const void *s, usize n) { for (usize i=0;i<n;++i) ((unsigned char*)d)[i]=((const unsigned char*)s)[i]; return d; }
 void *memset(void *d, int c, usize n) { for (usize i=0;i<n;++i) ((unsigned char*)d)[i]=c; return d; }
+
+/* Host-owned symbols must not interpose the app's compiler runtime, including
+ * its native assembly providers. A global app definition would also collide
+ * with these strong definitions at final link. */
+int __mulsi3(int a, int b) { (void)a; (void)b; return -1; }
+long long __muldi3(long long a, long long b) { (void)a; (void)b; return -1; }

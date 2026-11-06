@@ -22,6 +22,11 @@
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/InlineAsm.h>
+#include <llvm/Object/Binary.h>
+#include <llvm/Object/ELFObjectFile.h>
+#include <llvm/ObjCopy/CommonConfig.h>
+#include <llvm/ObjCopy/ELF/ELFConfig.h>
+#include <llvm/ObjCopy/ELF/ELFObjcopy.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -316,6 +321,45 @@ ZIG_EXTERN_C void ZigLLVMRunGlobalDCE(LLVMModuleRef module_ref) {
     ModulePassManager module_pm;
     module_pm.addPass(GlobalDCEPass());
     module_pm.run(llvm_module, module_am);
+}
+
+// Every input here is one freshly emitted compiler-owned ELF object. Platform
+// objects are never part of this operation. LLVM ObjCopy maintains symbol-table
+// ordering and remaps all relocation symbol indexes when changing bindings.
+ZIG_EXTERN_C bool ZigLLVMLocalizeObjectSymbols(const char *path,
+        const char *const *names, size_t name_count, char **error_message) {
+    auto fail = [&](Error error) {
+        *error_message = strdup(toString(std::move(error)).c_str());
+        return true;
+    };
+    auto bytes = MemoryBuffer::getFile(path);
+    if (!bytes) return fail(errorCodeToError(bytes.getError()));
+    auto binary = object::createBinary((*bytes)->getMemBufferRef());
+    if (!binary) return fail(binary.takeError());
+    auto *elf = dyn_cast<object::ELFObjectFileBase>(binary->get());
+    assert(elf && "compiler-owned RISC-V output must be ELF");
+    if (!elf) llvm_unreachable("compiler-owned RISC-V output must be ELF");
+
+    objcopy::CommonConfig config;
+    config.InputFilename = path;
+    config.OutputFilename = path;
+    for (size_t i = 0; i < name_count; ++i) {
+        if (Error error = config.SymbolsToLocalize.addMatcher(
+                objcopy::NameOrPattern::create(names[i], objcopy::MatchStyle::Literal,
+                    [](Error error) { return error; })))
+            return fail(std::move(error));
+    }
+    SmallVector<char, 0> output;
+    raw_svector_ostream stream(output);
+    if (Error error = objcopy::elf::executeObjcopyOnBinary(config, objcopy::ELFConfig{}, *elf, stream))
+        return fail(std::move(error));
+    std::error_code error;
+    raw_fd_ostream file(path, error);
+    if (error) return fail(errorCodeToError(error));
+    file.write(output.data(), output.size());
+    file.flush();
+    if (file.has_error()) return fail(errorCodeToError(file.error()));
+    return false;
 }
 
 static bool openEmitFile(const char *filename, std::unique_ptr<raw_fd_ostream> &dest, char **error_message) {

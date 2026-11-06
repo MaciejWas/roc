@@ -87,7 +87,9 @@ def main():
                     expected_float = 4 if abi.endswith("d") else 2 if abi.endswith("f") else 0
                     assert flags & 6 == expected_float, (isa, abi, flags)
                     assert bool(flags & 1) == ("c" in isa[4:]), (isa, flags)
-                    cpu = f"rv{bits}" if "a" in extensions else f"rv{bits},a=false,zawrs=false"
+                    cpu = f"rv{bits}" + "".join(
+                        f",{ext}={'true' if ext in extensions else 'false'}"
+                        for ext in ("m", "a", "f", "d", "c")) + ",zfa=false,zawrs=false"
                     text = run([f"qemu-system-riscv{bits}", "-machine", "virt", "-cpu", cpu,
                                 "-nographic", "-bios", "none", "-kernel", firmware], root, 15)
                     assert text == "riscv platform 12345 passed\n", repr(text)
