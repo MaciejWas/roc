@@ -24899,12 +24899,17 @@ ABI and code model, including compiler-rt. Compiler support is private to the
 resulting object. Source platform identity covers these literal settings; the
 object emission identity also contains their canonical representation. No
 RISC-V platform object or runtime payload may be borrowed from another target.
-The RV64 private runtime owns addition-and-shift multiplication and binary
-long division primitives (`__muldi3`, `__udivdi3`, `__umoddi3`, `__udivmoddi4`).
-Their bodies must not contain arithmetic that RV64I legalizes back to those
-same helpers. The payload exports the bodies with `roc__riscv_` names, and
-composition binds the canonical aliases before internalization. Wider and
-signed software arithmetic can call these native-word primitives.
+The RISC-V private runtime is composed at build time from the common runtime
+and the pinned, unmodified LLVM compiler-rt integer sources. Its native-word
+multiply is LLVM's assembly implementation for the target's XLEN; the remaining
+integer providers are ordinary C bitcode. Provider ownership is declared by the
+build, never repaired by per-application runtime alias rewrites. Assembly stays
+in the module and is emitted using the selected platform ISA, ABI and code model.
+After code generation, the complete compiler-owned ELF object localizes the
+explicit compiler-support symbol set, including assembly definitions, before
+any platform input is linked. LLVM ObjCopy maintains symbol and relocation
+indexes during this step. The same composition and privacy contract applies
+to RV32 and RV64, with and without M.
 
 `output: Exe` links firmware using the platform's startup inputs, entry point,
 and linker script. `output: Archive` packages Roc's app and its compiler-owned

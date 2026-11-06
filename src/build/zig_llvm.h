@@ -125,6 +125,11 @@ ZIG_EXTERN_C void ZigLLVMSetTargetAbi(LLVMModuleRef module_ref, const char *abi)
 
 ZIG_EXTERN_C void ZigLLVMRunGlobalDCE(LLVMModuleRef module_ref);
 
+// Seal compiler-support definitions after machine-code emission, including
+// assembly providers which LLVM IR internalization cannot reach.
+ZIG_EXTERN_C bool ZigLLVMLocalizeObjectSymbols(const char *path,
+    const char *const *names, size_t name_count, char **error_message);
+
 ZIG_EXTERN_C LLVMTargetMachineRef ZigLLVMCreateTargetMachine(LLVMTargetRef T, const char *Triple,
     const char *CPU, const char *Features, LLVMCodeGenOptLevel Level, LLVMRelocMode Reloc,
     LLVMCodeModel CodeModel, bool function_sections, bool data_sections, ZigLLVMFloatABI float_abi,

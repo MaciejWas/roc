@@ -2997,11 +2997,12 @@ pub fn build(b: *std.Build) void {
 
     // The private runtime every native LLVM object links, one per target that
     // `llvmPrivateRuntimeTarget` names.
+    const runtime_composer = addRuntimeComposer(b, dependency_source);
     var private_runtime_entries: std.ArrayList(u8) = .empty;
     for (std.enums.values(roc_target.RocTarget)) |runtime_target| {
         if (runtime_target.llvmPrivateRuntimeTarget() != runtime_target) continue;
         const file_name = b.fmt("private_runtime_{s}.bc", .{@tagName(runtime_target)});
-        _ = llvm_embedded_files.addCopyFile(addLlvmPrivateRuntimeBitcode(b, runtime_target), file_name);
+        _ = llvm_embedded_files.addCopyFile(addLlvmPrivateRuntimeBitcode(b, runtime_target, runtime_composer), file_name);
         private_runtime_entries.print(b.allocator, "    .{{ .target = .{s}, .bitcode = @embedFile(\"{s}\") }},\n", .{ @tagName(runtime_target), file_name }) catch @panic("OOM");
     }
 
@@ -5627,7 +5628,7 @@ fn addSha256RoundsBitcode(b: *std.Build, comptime rounds_name: []const u8, query
 /// LLVM bitcode for src/builtins/llvm_private_runtime.zig compiled for
 /// `runtime_target` at the lowest CPU level that target names, so one runtime
 /// serves every CPU level of the target.
-fn addLlvmPrivateRuntimeBitcode(b: *std.Build, runtime_target: roc_target.RocTarget) std.Build.LazyPath {
+fn addLlvmPrivateRuntimeBitcode(b: *std.Build, runtime_target: roc_target.RocTarget, composer: *Step.Compile) std.Build.LazyPath {
     const lowest_cpu_target = runtime_target.baselineCpuTarget() orelse runtime_target;
     const resolved = b.resolveTargetQuery(lowest_cpu_target.llvmTargetQuery());
     const compiler_rt_module = b.createModule(.{
@@ -5655,7 +5656,87 @@ fn addLlvmPrivateRuntimeBitcode(b: *std.Build, runtime_target: roc_target.RocTar
     obj.use_llvm = true;
     obj.bundle_compiler_rt = false;
     _ = obj.getEmittedBin();
-    return obj.getEmittedLlvmBc();
+    const common = obj.getEmittedLlvmBc();
+    return switch (runtime_target) {
+        .riscv32elf, .riscv64elf => addRiscvIntegerRuntime(b, runtime_target, common, composer),
+        else => common,
+    };
+}
+
+/// The host tool composes runtime providers once, before they are embedded.
+/// It intentionally has no dependency on Roc modules or embedded runtimes.
+fn addRuntimeComposer(b: *std.Build, source: DependencySource) *Step.Compile {
+    const paths = llvmPaths(b, b.graph.host, source);
+    const tool = b.addExecutable(.{
+        .name = "compose_runtime",
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .link_libcpp = b.graph.host.result.os.tag != .windows or b.graph.host.result.abi != .msvc,
+        }),
+    });
+    tool.root_module.addCSourceFile(.{ .file = b.path("src/build/compose_runtime.cpp"), .flags = &exe_cflags });
+    tool.root_module.addIncludePath(paths.include);
+    tool.root_module.addLibraryPath(paths.lib);
+    const static = std.Build.Module.LinkSystemLibraryOptions{ .preferred_link_mode = .static, .search_strategy = .mode_first };
+    for (llvm_libs) |name| tool.root_module.linkSystemLibrary(name, static);
+    tool.root_module.linkSystemLibrary("z", static);
+    const compression = b.dependency("zstd", .{ .target = b.graph.host, .optimize = .ReleaseFast });
+    tool.root_module.linkLibrary(compression.artifact("zstd"));
+    if (b.graph.host.result.os.tag == .windows) {
+        for ([_][]const u8{ "ws2_32", "version", "uuid", "ole32" }) |name|
+            tool.root_module.linkSystemLibrary(name, .{});
+    }
+    return tool;
+}
+
+/// LLVM compiler-rt's standard integer provider selection for each XLEN.
+/// Sources are unmodified and pinned in vendor/compiler-rt/README.md.
+fn addRiscvIntegerRuntime(b: *std.Build, runtime_target: roc_target.RocTarget, common: std.Build.LazyPath, composer: *Step.Compile) std.Build.LazyPath {
+    const bits = runtime_target.ptrBitWidth();
+    const triple = b.fmt("riscv{d}-freestanding-none", .{bits});
+    const cpu = b.fmt("-mcpu=generic_rv{d}", .{bits});
+    const native_mul = switch (runtime_target) {
+        .riscv32elf => "mulsi3",
+        .riscv64elf => "muldi3",
+        else => unreachable,
+    };
+    const preprocess = b.addSystemCommand(&.{ b.graph.zig_exe, "cc", "-target", triple, cpu, "-E", "-P", "-x", "assembler-with-cpp", "-Wno-unused-command-line-argument" });
+    preprocess.addFileArg(b.path(b.fmt("vendor/compiler-rt/lib/builtins/riscv/{s}.S", .{native_mul})));
+    preprocess.addArg("-o");
+    const assembly = preprocess.addOutputFileArg("native_mul.s");
+    // The include is an explicit build input as well as a C preprocessor input.
+    preprocess.addFileInput(b.path("vendor/compiler-rt/lib/builtins/riscv/int_mul_impl.inc"));
+
+    const compose = b.addRunArtifact(composer);
+    const output = compose.addOutputFileArg("runtime.bc");
+    compose.addFileArg(common);
+    compose.addFileArg(assembly);
+    compose.addArg(b.fmt("__{s}", .{native_mul}));
+    const providers = [_][]const u8{
+        "divsi3", "modsi3", "udivsi3", "umodsi3", "udivmodsi4",
+        "divdi3", "moddi3", "udivdi3", "umoddi3", "udivmoddi4",
+        "multi3",
+    };
+    for (providers) |name| compose.addFileArg(addCompilerRtIntegerBitcode(b, name, triple, cpu));
+    // RV32's 64-bit product decomposes to the native 32-bit multiply. RV64
+    // instead uses LLVM's native 64-bit assembly provider above.
+    if (runtime_target == .riscv32elf) compose.addFileArg(addCompilerRtIntegerBitcode(b, "muldi3", triple, cpu));
+    return output;
+}
+
+fn addCompilerRtIntegerBitcode(b: *std.Build, name: []const u8, triple: []const u8, cpu: []const u8) std.Build.LazyPath {
+    const compile = b.addSystemCommand(&.{
+        b.graph.zig_exe, "cc",                   "-target", triple,       cpu,  "-O2", "-ffreestanding",
+        "-fno-builtin",  "-fno-stack-protector", "-fPIC",   "-emit-llvm", "-c",
+    });
+    compile.addFileArg(b.path(b.fmt("vendor/compiler-rt/lib/builtins/{s}.c", .{name})));
+    compile.addArg("-o");
+    const output = compile.addOutputFileArg(b.fmt("{s}.bc", .{name}));
+    for ([_][]const u8{ "int_lib.h", "int_types.h", "int_endianness.h", "int_util.h", "int_div_impl.inc" }) |header|
+        compile.addFileInput(b.path(b.fmt("vendor/compiler-rt/lib/builtins/{s}", .{header})));
+    return output;
 }
 
 /// Run the wasm static-lib test runner on one built app as part of `step`.

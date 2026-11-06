@@ -22,15 +22,6 @@ pub const panic = std.debug.no_panic;
 comptime {
     // Referencing compiler-rt compiles every routine it exports.
     _ = @import("compiler_rt");
-    // Zig's decomposed i64 arithmetic uses native u32 arithmetic. RV64I
-    // legalizes that back to the i64 helpers, recursively calling them.
-    // Own the native-word primitives with instruction-only bodies.
-    if (builtin.cpu.arch == .riscv64) {
-        @export(&muldi3, .{ .name = "roc__riscv_muldi3", .linkage = .strong, .visibility = .hidden });
-        @export(&udivdi3, .{ .name = "roc__riscv_udivdi3", .linkage = .strong, .visibility = .hidden });
-        @export(&umoddi3, .{ .name = "roc__riscv_umoddi3", .linkage = .strong, .visibility = .hidden });
-        @export(&udivmoddi4, .{ .name = "roc__riscv_udivmoddi4", .linkage = .strong, .visibility = .hidden });
-    }
     if (builtin.os.tag.isDarwin()) {
         @export(&bzero, .{ .name = "bzero", .linkage = .weak, .visibility = .hidden });
     }
@@ -41,45 +32,4 @@ comptime {
 fn bzero(dest: ?[*]u8, len: usize) callconv(.c) void {
     @disableIntrinsics();
     _ = compiler_rt.memset(dest, 0, len);
-}
-
-/// Low 64 bits of the product, using only operations RV64I implements.
-fn muldi3(a: i64, b: i64) callconv(.c) i64 {
-    var x: u64 = @bitCast(a);
-    var y: u64 = @bitCast(b);
-    var result: u64 = 0;
-    while (x != 0) {
-        if (x & 1 != 0) result +%= y;
-        x >>= 1;
-        y <<= 1;
-    }
-    return @bitCast(result);
-}
-
-/// Binary long division, including a carry when doubling the remainder.
-/// No multiply, divide, or remainder operation may occur in these primitives.
-fn udivmoddi4(a: u64, b: u64, remainder: ?*u64) callconv(.c) u64 {
-    var quotient: u64 = 0;
-    var rem: u64 = 0;
-    for (0..64) |i| {
-        const shift: u6 = @intCast(63 - i);
-        const carry = rem >> 63 != 0;
-        rem = (rem << 1) | ((a >> shift) & 1);
-        if (carry or rem >= b) {
-            rem -%= b;
-            quotient |= @as(u64, 1) << shift;
-        }
-    }
-    if (remainder) |ptr| ptr.* = rem;
-    return quotient;
-}
-
-fn udivdi3(a: u64, b: u64) callconv(.c) u64 {
-    return udivmoddi4(a, b, null);
-}
-
-fn umoddi3(a: u64, b: u64) callconv(.c) u64 {
-    var rem: u64 = undefined;
-    _ = udivmoddi4(a, b, &rem);
-    return rem;
 }

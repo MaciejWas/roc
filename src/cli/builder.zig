@@ -275,7 +275,6 @@ const llvm_externs = if (llvm_available) struct {
     extern fn LLVMGetFirstGlobalAlias(module: ?*anyopaque) ?*anyopaque;
     extern fn LLVMGetNextGlobalAlias(alias: ?*anyopaque) ?*anyopaque;
     extern fn LLVMAliasGetAliasee(alias: ?*anyopaque) ?*anyopaque;
-    extern fn LLVMAliasSetAliasee(alias: ?*anyopaque, aliasee: ?*anyopaque) void;
     extern fn LLVMReplaceAllUsesWith(old_val: ?*anyopaque, new_val: ?*anyopaque) void;
     // The builtins were compiled with explicit target-cpu/target-features; the app
     // functions have none, and the inliner refuses to inline a callee whose features
@@ -288,6 +287,7 @@ const llvm_externs = if (llvm_available) struct {
     extern fn LLVMAddAttributeAtIndex(fn_val: ?*anyopaque, idx: c_uint, attr: ?*anyopaque) void;
     extern fn LLVMGetNamedFunction(module: ?*anyopaque, name: [*:0]const u8) ?*anyopaque;
     extern fn ZigLLVMRunGlobalDCE(module: ?*anyopaque) void;
+    extern fn ZigLLVMLocalizeObjectSymbols(path: [*:0]const u8, names: [*]const [*:0]const u8, name_count: usize, error_message: *[*:0]u8) bool;
     // The private runtime's routines are kept through `llvm.compiler.used`.
     extern fn LLVMGetNamedGlobalAlias(module: ?*anyopaque, name: [*]const u8, len: usize) ?*anyopaque;
     extern fn LLVMAddGlobal(module: ?*anyopaque, ty: ?*anyopaque, name: [*:0]const u8) ?*anyopaque;
@@ -497,30 +497,13 @@ fn isPrivateRuntimeRoutine(name: []const u8, routines: []const [:0]const u8) boo
 /// references none of them, so each call the code generator emits binds to
 /// the object's own definition. Everything else in the runtime is internal
 /// before linking and remains only where a routine uses it.
-fn linkPrivateRuntime(module: ?*anyopaque, bitcode: []const u8, target_triple_z: [*:0]const u8, runtime_target: target.RocTarget) bool {
-    const riscv = runtime_target == .riscv32elf or runtime_target == .riscv64elf;
+fn linkPrivateRuntime(module: ?*anyopaque, bitcode: []const u8, target_triple_z: [*:0]const u8, riscv: bool) bool {
     const routines: []const [:0]const u8 = if (riscv) &builtins.shim_symbols.riscv_private_runtime_set else &builtins.shim_symbols.llvm_private_runtime_set;
     const externs = llvm_externs;
     const buffer = externs.LLVMCreateMemoryBufferWithMemoryRangeCopy(bitcode.ptr, bitcode.len, "roc-llvm-private-runtime-bc");
     var runtime_module: ?*anyopaque = null;
     if (externs.LLVMParseBitcode2(buffer, &runtime_module) != 0) return false;
     externs.LLVMSetTarget(runtime_module, target_triple_z);
-    if (runtime_target == .riscv64elf) {
-        // The payload supplies instruction-only RV64I arithmetic primitives.
-        // Bind their compiler-rt entries before internalization and DCE.
-        const primitives = .{
-            .{ "__muldi3", "roc__riscv_muldi3" },
-            .{ "__udivdi3", "roc__riscv_udivdi3" },
-            .{ "__umoddi3", "roc__riscv_umoddi3" },
-            .{ "__udivmoddi4", "roc__riscv_udivmoddi4" },
-        };
-        inline for (primitives) |primitive| {
-            const implementation = externs.LLVMGetNamedGlobalAlias(runtime_module, primitive[1], primitive[1].len) orelse unreachable;
-            const entry = externs.LLVMGetNamedGlobalAlias(runtime_module, primitive[0], primitive[0].len) orelse unreachable;
-            externs.LLVMAliasSetAliasee(entry, externs.LLVMAliasGetAliasee(implementation) orelse unreachable);
-        }
-    }
-
     externs.LLVMSetDataLayout(runtime_module, externs.LLVMGetDataLayoutStr(module));
     if (externs.LLVMGetNamedGlobal(runtime_module, "llvm.used")) |used| externs.LLVMDeleteGlobal(used);
     if (externs.LLVMGetNamedGlobal(runtime_module, "llvm.compiler.used")) |compiler_used| externs.LLVMDeleteGlobal(compiler_used);
@@ -895,7 +878,7 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
 
     if (config.private_runtime) {
         if (config.target.llvmPrivateRuntimeTarget()) |runtime_target| {
-            if (!linkPrivateRuntime(module, privateRuntimeBitcode(runtime_target), target_triple_z.ptr, runtime_target)) {
+            if (!linkPrivateRuntime(module, privateRuntimeBitcode(runtime_target), target_triple_z.ptr, config.riscv != null)) {
                 std.log.err("Failed to link the LLVM private runtime for {s}", .{@tagName(runtime_target)});
                 return false;
             }
@@ -1032,6 +1015,20 @@ pub fn compileBitcodeToObject(gpa: Allocator, std_io: std.Io, config: CompileCon
         try renderEmitError(gpa, config.output_path, std.mem.span(emit_error_message), config.report_config);
         externs.LLVMDisposeMessage(emit_error_message);
         return false;
+    }
+
+    // Native assembly providers are outside LLVM IR's linkage model. Seal
+    // every compiler-support definition in the complete app object before it
+    // can meet any platform input, for either RISC-V pointer width.
+    if (config.private_runtime and config.riscv != null) {
+        const routines = builtins.shim_symbols.riscv_private_runtime_set;
+        var names: [routines.len][*:0]const u8 = undefined;
+        for (routines, &names) |name, *destination| destination.* = name.ptr;
+        if (externs.ZigLLVMLocalizeObjectSymbols(object_path_z.ptr, &names, names.len, &emit_error_message)) {
+            try renderEmitError(gpa, config.output_path, std.mem.span(emit_error_message), config.report_config);
+            externs.LLVMDisposeMessage(emit_error_message);
+            return false;
+        }
     }
 
     std.log.debug("Successfully compiled bitcode to object file: {s}", .{config.output_path});
